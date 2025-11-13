@@ -2,11 +2,16 @@
 // download that task, edit the yjs to show the current state and upload the finished data once complete
 
 import grpc from "@grpc/grpc-js";
+// @ts-expect-error - Using JS module without types
 import { VoltClient } from "@tdxvolt/volt-client-grpc";
 import * as Y from "yjs";
 import { v4 as uuidv4, v4 } from "uuid";
 import { sign, verify } from "verifiable-credential-toolkit";
 import winston from 'winston';
+import { Sign } from "crypto";
+import { SignedTaskCredential } from "./types/shared.types";
+import { TaskMetadata } from "./types/config.types";
+import { PublishWireRequest, PublishWireResponse, Resource, SaveResourceRequest, Status, SubscribeWireResponse } from "./types/volt.types";
 
 // Self-contained logger configuration
 const logger = winston.createLogger({
@@ -58,14 +63,14 @@ logger.level = 'warn';
  * @property {() => void} close - Close the wire subscription
  */
 
-var voltClient;
+var voltClient: VoltClient;
 
 /**
  * Initialises the Volt client with the provided configuration.
  * @param {string} voltConfig The path to the Volt configuration file 
  * @returns {Promise<VoltClient>} Resolves with the initialised Volt client.
  */
-export async function getAndInitialiseVoltClient(voltConfig) {
+export async function getAndInitialiseVoltClient(voltConfig:string): Promise<VoltClient> {
     logger.info("initialising Volt client");
     voltClient = new VoltClient(grpc);
     await voltClient.initialise(voltConfig);
@@ -73,7 +78,15 @@ export async function getAndInitialiseVoltClient(voltConfig) {
 
 }
 
-
+interface InstallAndLaunchParams {
+    agent_name: string;
+    zip: string;
+    callback: (taskID: string, taskOutput: any, taskListMap: Y.Map<any>, taskOutputsMap: Y.Map<any>, spareArgs: any) => void;
+    cli_args?: string;
+    taskList: Y.Doc;
+    taskOutputs: Y.Doc;
+    spareArgs: any;
+}
 
 /**
  * Installs and launches a new agent task, subscribes to its wire, and observes outputs.
@@ -88,7 +101,7 @@ export async function getAndInitialiseVoltClient(voltConfig) {
  * @param {Object} params.spareArgs - Additional arguments to pass to the callback.
  * @returns {Promise<void>} Resolves when the task is installed and launched.
  */
-export async function install_and_launch({ agent_name, zip, callback, cli_args, taskList, taskOutputs, spareArgs }) {
+export async function install_and_launch({ agent_name, zip, callback, cli_args, taskList, taskOutputs, spareArgs }: InstallAndLaunchParams): Promise<void> {
     if (!cli_args) {
         logger.info("no cli_args provided, setting to empty string");
         cli_args = "";
@@ -98,7 +111,7 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
     const task_finished_indicator = `task-finished-${taskID}`;
 
     const taskListMap = getMapFromSubDoc(taskList);
-    const taskOutputsMap = getMapFromSubDoc(taskOutputs)
+    const taskOutputsMap:Y.Map<Y.Doc> = getMapFromSubDoc(taskOutputs)
 
 
     const taskVC = create_signed_task({
@@ -113,10 +126,10 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
 
     try {
         const wireSubscription = await subscribeToWire(taskID);
-        wireSubscription.onData((chunk, allChunks, error) => {
+        wireSubscription.onData((chunk: string , allChunks: any, error: any) => {
             if (chunk.includes(task_finished_indicator)) {
                 logger.info("task finished indicator found in wire data");
-                callback(taskID, taskOutputsMap[taskID], taskListMap, taskOutputsMap, spareArgs);
+                callback(taskID, taskOutputsMap.get(taskID), taskListMap, taskOutputsMap, spareArgs);
                 const uninstall_task_vc = create_signed_task({ "task-id": taskID, "action": "uninstall-task", "name": "uninstall_task" });
                 taskListMap.set(taskID, { credential: uninstall_task_vc });
             } else if (chunk.includes("task-failed-"+taskID)){
@@ -149,7 +162,7 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
  * @param {string} message - The message to publish.
  * @returns {Promise<void>} Resolves when the message is successfully published.
  */
-export async function publishToInterAgentWire(wireId, message) {
+export async function publishToInterAgentWire(wireId:string, message:string): Promise<void> {
     // create a wire with the given alias
     return new Promise((resolve, reject) => {
         const sendableMessage = Buffer.from(message);
@@ -176,7 +189,7 @@ export async function publishToInterAgentWire(wireId, message) {
             resolve();
         });
 
-        pub.on("error", (err) => {
+        pub.on("error", (err:Error) => {
             logger.error("publication error: [%s]", err.message);
             reject(err);
         });
@@ -192,7 +205,7 @@ export async function publishToInterAgentWire(wireId, message) {
  * @param {*} wireID The ID of the wire to subscribe to.
  * @returns {AsyncGenerator<string>} An async generator that yields data chunks as they arrive.
  */
-export async function* wireGenerator(wireAlias, wireID) {
+export async function* wireGenerator(wireAlias:string, wireID:string): AsyncGenerator<string> {
     logger.info("subscribing to wire with alias:", wireAlias);
     logger.info("wireID:", wireID);
 
@@ -204,15 +217,15 @@ export async function* wireGenerator(wireAlias, wireID) {
 
                 // Handle new data using a promise-based approach
         let streamEnded = false;
-        const dataQueue = [];
+        const dataQueue:string[] = [];
         
         // Set up data handlers
-        const unsubscribeData = wire.onData((chunk) => {
+        const unsubscribeData = wire.onData((chunk:Buffer) => {
             logger.info("New data chunk received:", chunk.toString('utf-8'));
             dataQueue.push(chunk.toString('utf-8'));
         });
         
-        const unsubscribeError = wire.onError((error) => {
+        const unsubscribeError = wire.onError((error:Error) => {
             logger.warn("Wire error:", error);
             streamEnded = true;
         });
@@ -263,46 +276,55 @@ export async function* wireGenerator(wireAlias, wireID) {
     yield* createDataStream();
 }
 
-async function getExistingTransmissions(alias, voltClient) {
+async function getExistingTransmissions(alias:string , voltClient:VoltClient) {
     const results = await voltClient.SqlExecuteJSON({
         database_id: alias,
         statement: "SELECT * FROM wire_data"
-    }).catch((error) => {
+    }).catch((error:Error) => {
         logger.error("Error fetching existing transmissions:", error);
     });
 
     return results;
 }
 
-
+interface WireSubscription {
+    onData: (callback: Function) => () => boolean;
+    onError: (callback: Function) => () => boolean;
+    getAllData: () => Buffer[];
+    close: () => void;
+}
 //TODO: continue to think about moving this to a generator
 /**
  * Subscribe to a wire and return an interface for handling incoming data
  * @param {string} wireName - The ID of the task/wire to subscribe to
- * @returns {Promise<WireSubscription>} An object with the following methods to handle incoming data.
+ * @returns An object with the following methods to handle incoming data.
  * - onData: Add a callback to be called when new data arrives
  * - onError: Add a callback to be called when an error occurs
  * - getAllData: Get all data chunks received so far
  * 
  */
-export async function subscribeToWire(wireName) {
+export async function subscribeToWire(wireName:string):Promise<WireSubscription> {
     logger.info("in SUBSCRIBE TO WIRE");
     try {
-        const chunks = [];
-        const callbacks = new Set();
-        const errorCallbacks = new Set();
+        const chunks: Buffer[]= [];
+        const callbacks:Set<Function> = new Set();
+        const errorCallbacks:Set<Function>  = new Set();
 
 
         // Default error handler
-        let defaultErrorHandler = (error) => {
+        let defaultErrorHandler = (error: Error) => {
             logger.error("Unhandled wire stream error: %o", error);
         };
 
         const wireStream = await voltClient.SubscribeWire({ wire_id: wireName });
         logger.info("wire subscribed for wireName: %s", wireName);
 
-        wireStream.on("data", (data) => {
+        wireStream.on("data", (data: SubscribeWireResponse) => {
             // logger.info("wire data received: %s", data.chunk);
+            if (!data.chunk) {
+                logger.warn("Received data event with no chunk");
+                return;
+            }
             chunks.push(data.chunk);
 
             callbacks.forEach(callback => {
@@ -314,7 +336,7 @@ export async function subscribeToWire(wireName) {
             });
         });
 
-        wireStream.on("error", (error) => {
+        wireStream.on("error", (error:Error) => {
 
             logger.error("Error in wire stream: %o", error);
             if (errorCallbacks.size > 0) {
@@ -325,11 +347,11 @@ export async function subscribeToWire(wireName) {
         });
 
         const wireInterface = {
-            onData: (callback) => {
+            onData: (callback:Function) => {
                 callbacks.add(callback);
                 return () => callbacks.delete(callback);
             },
-            onError: (callback) => {
+            onError: (callback:Function) => {
                 errorCallbacks.add(callback);
                 return () => errorCallbacks.delete(callback);
             },
@@ -349,9 +371,8 @@ export async function subscribeToWire(wireName) {
 
 /**
  * Function to initialise the sub-documents used by the agent in the yjs, in theory should all be done by the host
- * @param {Ymap} someJSON 
  */
-export function initialiseSubDocs(agentStateMap) {
+export function initialiseSubDocs(agentStateMap:Y.Map<Y.Doc>) {
     if (!agentStateMap.has("pythonTaskList")) {
         agentStateMap.set("pythonTaskList", new Y.Doc());
     }
@@ -373,7 +394,7 @@ export function initialiseSubDocs(agentStateMap) {
 /**
  * @param {Y.Doc} subdoc - The subdocument you want the map from 
  */
-function getMapFromSubDoc(subdoc){
+function getMapFromSubDoc<T = unknown>(subdoc:Y.Doc): Y.Map<T> {
     subdoc.load();
     return subdoc.getMap();
 }
@@ -385,7 +406,7 @@ function getMapFromSubDoc(subdoc){
  * @param {string} taskLocation - The location of the task, typically a URL or martketplace uuid TODO: waiting on Toby file size limitation check
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
  */
-export function installTask(taskID, taskName, taskLocation, sourceType, taskList) {
+export function installTask(taskID: string, taskName: string, taskLocation: string, sourceType: string, taskList: Y.Doc) {
     const taskVC = create_signed_task({ "task-id": taskID, "action": "new-task", "name": taskName, "location": taskLocation, source: sourceType });
     getMapFromSubDoc(taskList).set(taskID, { credential: taskVC });
 }
@@ -396,7 +417,7 @@ export function installTask(taskID, taskName, taskLocation, sourceType, taskList
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
  * @param {string} cli_args - Command-line arguments to pass to the agent.
  */
-export function startTask(taskID, taskList, cli_args) {
+export function startTask(taskID:string, taskList:Y.Doc, cli_args:string) {
     const taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "cli_args": cli_args })
     getMapFromSubDoc(taskList).set(v4(), { credential: taskVC2 });
 }
@@ -406,14 +427,14 @@ export function startTask(taskID, taskList, cli_args) {
  * @param {string} taskID - The unique ID for the task. 
  * @returns {Promise<void>} - Resolves when the task is finished, rejects on error.
  */
-export async function waitForTaskFinished(taskID) {
+export async function waitForTaskFinished(taskID:string):Promise<void> {
     const task_finished_indicator = `task-finished-${taskID}`;
     logger.info("Waiting for task to finish with ID:", taskID);
     return new Promise(async (resolve, reject) => {
         try {
             const wireSubscription = await subscribeToWire(taskID);
             logger.info("Subscribed to wire for task ID:", taskID);
-            wireSubscription.onData((chunk, allChunks, error) => {
+            wireSubscription.onData((chunk:string, allChunks:string[], error:Error) => {
                 logger.info("chunk received: %s", chunk);
                 if (error) {
                     logger.info("Error receiving task finished indicator: %o", error);
@@ -442,7 +463,7 @@ export async function waitForTaskFinished(taskID) {
  * @param {string} taskID - The unique ID for the task.
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
  */
-export function uninstallTask(taskID, taskList) {
+export function uninstallTask(taskID:string, taskList:Y.Doc) {
     const taskVC3 = create_signed_task({ "task-id": taskID, "action": "uninstall-task" })
     getMapFromSubDoc(taskList).set(v4(), { credential: taskVC3 });
 }
@@ -456,9 +477,9 @@ export function uninstallTask(taskID, taskList) {
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
  * @returns {Promise<Object>} - Resolves with the metadata object for the task.
  */
-export function getTaskMetadata(taskID, taskList) {
+export function getTaskMetadata(taskID:string, taskList:Y.Doc):Promise<TaskMetadata> {
     const taskVersionVC = create_signed_task({ "task-id": taskID, "action": "task-version" });
-    const metadataPromise = new Promise((resolve, reject) => {
+    const metadataPromise = new Promise<TaskMetadata>((resolve, reject) => {
         handleWireSubscription(resolve, reject, taskID);
     });
     getMapFromSubDoc(taskList).set(v4(), { credential: taskVersionVC });
@@ -470,9 +491,9 @@ export function getTaskMetadata(taskID, taskList) {
  * Requests and retrieves status for a task.
  * @param {string} taskID - The unique ID for the task.
  * @param {Y.Doc} taskList - The Ydoc containing the tasks ymap
- * @returns {Promise<Object>} - Resolves with the status object for the task.
+ * @returns  - Resolves with the status object for the task.
  */
-export function getTaskStatus(taskID, taskList) {
+export function getTaskStatus(taskID:string, taskList:Y.Doc) {
     const taskStatusVC = create_signed_task({ "task-id": taskID, "action": "task-status" });
     const taskStatusPromise = new Promise(async (resolve, reject) => {
         try {
@@ -491,7 +512,7 @@ export function getTaskStatus(taskID, taskList) {
 }
 
 
-export function create_signed_task(task) {
+export function create_signed_task(task:SignedTaskCredential["credentialSubject"]): SignedTaskCredential {
 
     // turn the task into a vc and sign it
     const validFrom = new Date().toISOString();
@@ -511,18 +532,18 @@ export function create_signed_task(task) {
     };
     const private_key = getPrivateKey();
     const vc = sign(unsigned_vc, private_key);
-    const vc_object = mapToObject(vc);
+    const vc_object:SignedTaskCredential = mapToObject(vc);
     return vc_object;
 }
 
-export async function deleteWire(wire_id) {
+export async function deleteWire(wire_id:string) {
     const deleteResourceRequest = {resource_id: wire_id, recursive: true};
     return voltClient
     .DeleteResource(deleteResourceRequest)
-    .then((response) => {
+    .then((response:{status:Status}) => {
         logger.info(`Wire resource with ID ${wire_id} deleted successfully.`);
         return response;
-    }).catch((err) => {
+    }).catch((err:Error) => {
         logger.error("Error deleting wire resource: [%s]", err.message);
         throw err;
     });
@@ -532,7 +553,7 @@ export async function deleteWire(wire_id) {
  * @param {string} wire_id - The ID of the wire to create.
  * @returns {Promise<Object>} Resolves with the created wire resource.
  */
-export async function createPersistentWire(wire_id) {
+export async function createPersistentWire(wire_id:string):Promise<Resource> {
     const wireMetadata = {
         name: wire_id,
         kind: ["volt:wire", "volt:database", "volt:sqlite-database"],
@@ -557,11 +578,11 @@ export async function createPersistentWire(wire_id) {
             resource: wireMetadata,
             create: true
         })
-        .then((response) => {
+        .then((response:SaveResourceRequest) => {
             logger.info(`created wire resource: ${response.resource.id}`);
             return response.resource;
         })
-        .catch((err) => {
+        .catch((err:Error) => {
             logger.error("failure: [%s]", err.message);
             throw err;
         });
@@ -569,13 +590,14 @@ export async function createPersistentWire(wire_id) {
 
 
 
-export function observeTaskOutputs(taskOutputs, taskID) {
+export function observeTaskOutputs(taskOutputs:Y.Doc, taskID:string) {
     logger.info("observing taskOutputsMap for taskID: %s", taskID);
-    const taskOutputsMap = getMapFromSubDoc(taskOutputs)
+    const taskOutputsMap:Y.Map<Y.Doc> = getMapFromSubDoc(taskOutputs)
     taskOutputsMap.observe(() => {
         for (const [key, value] of taskOutputsMap.entries()) {
             value.load();
-            const taskOutputText = value;
+            const taskOutputText = value.getText();
+
             logger.info("in the observe %s", key);
 
             if (key == taskID) {
@@ -595,7 +617,7 @@ export function observeTaskOutputs(taskOutputs, taskID) {
  * @param {Y.Doc} doc 
  * @returns 
  */
-export async function waitForDocSync(doc) {
+export async function waitForDocSync(doc:Y.Doc) {
     const anyDoc = doc;
     if (anyDoc.isSynced) return;
 
@@ -604,7 +626,7 @@ export async function waitForDocSync(doc) {
     }
 
     anyDoc._syncWaitPromise = new Promise((resolve) => {
-        const handler = (isSynced) => {
+        const handler = (isSynced:boolean) => {
             if (!isSynced) return;
 
             anyDoc.isSynced = true;
@@ -624,10 +646,10 @@ export async function waitForDocSync(doc) {
  * @param {string} taskId 
  * @returns 
  */
-export async function getTaskOutputJson(ydoc, taskId) {
+export async function getTaskOutputJson(ydoc:Y.Doc, taskId:string):Promise<string> {
 
     return new Promise(async (resolve, reject) => {
-        const rootDocumentMap = ydoc.getMap();
+        const rootDocumentMap:Y.Map<Y.Doc> = ydoc.getMap();
         let externalPumpDoc = rootDocumentMap.get("externalPumps");
         if (!externalPumpDoc) {
             externalPumpDoc = new Y.Doc();
@@ -637,8 +659,16 @@ export async function getTaskOutputJson(ydoc, taskId) {
         externalPumpDoc.load();
         await waitForDocSync(externalPumpDoc);
 
-        let externalPumpMap = externalPumpDoc.getMap();
+        let externalPumpMap:Y.Map<Y.Doc>  = externalPumpDoc.getMap();
+        if (!externalPumpMap) {
+            reject("No output found for taskId: " + taskId);
+            return;
+        }
         let taskPumpDoc = externalPumpMap.get(taskId);
+        if (!taskPumpDoc) {
+            reject("No output found for taskId: " + taskId);
+            return;
+        }
         taskPumpDoc.load();
         await waitForDocSync(taskPumpDoc);
 
@@ -653,10 +683,10 @@ export async function getTaskOutputJson(ydoc, taskId) {
 }
 
 
-async function handleWireSubscription(resolve, reject, taskID) {
+async function handleWireSubscription(resolve: { (value: TaskMetadata | PromiseLike<TaskMetadata>): void; (arg0: any): void; }, reject: { (reason?: any): void; (arg0: unknown): void; }, taskID: string) {
     try {
         const wireSubscription = await subscribeToWire(taskID);
-        wireSubscription.onData((chunk, allChunks, error) => {
+        wireSubscription.onData((chunk: string, allChunks: string[], error: Error) => {
             if (error) {
                 logger.error("Error receiving task metadata: %o", error);
                 reject(error);
@@ -686,8 +716,8 @@ async function handleWireSubscription(resolve, reject, taskID) {
     }
 }
 
-function handleWireStatus(resolve, reject, wireSubscription, taskID) {
-    return function (chunk, allChunks, error) {
+function handleWireStatus(resolve: { (value: unknown): void; (arg0: any): void; }, reject: { (reason?: any): void; (arg0: unknown): void; }, wireSubscription:WireSubscription, taskID: string) {
+    return function (chunk: string, allChunks: string[], error: Error) {
         if (error) {
             logger.error("Error receiving task status: %o", error);
             reject(error);
@@ -714,7 +744,7 @@ function handleWireStatus(resolve, reject, wireSubscription, taskID) {
     };
 }
 
-function mapToObject(map) {
+function mapToObject(map: any): any {
     if (Array.isArray(map)) {
         logger.info("map is an array", map);
         return map;
@@ -724,7 +754,7 @@ function mapToObject(map) {
         return map;
     }
 
-    const obj = {};
+    const obj:Record<any,any> = {};
     const entries = map instanceof Map ? map.entries() : Object.entries(map);
 
     for (const [key, value] of entries) {

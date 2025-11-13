@@ -1,9 +1,12 @@
 {
   "name": "@nqminds/smart-agent-functions",
   "version": "1.0.0",
-  "main": "smart_agent_functions.js",
+  "main": "dist/smart_agent_functions.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [],
   "author": "",
@@ -14,9 +17,22 @@
   "dependencies": {
     "@grpc/grpc-js": "^1.14.1",
     "@tdxvolt/volt-client-grpc": "^0.20.8",
+    "npx": "^10.2.2",
+    "tsx": "^4.20.6",
     "uuid": "^9.0.1",
     "verifiable-credential-toolkit": "^0.5.0",
     "winston": "^3.18.3",
     "yjs": "^13.6.27"
-  }
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.9.3"
+  },
+  "types": "dist/smart_agent_functions.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ]
 }
