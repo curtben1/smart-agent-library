@@ -24,6 +24,7 @@ export interface TaskCredentialSubject {
   location?: string;
   source?: "http" | "https" | "marketplace";
   cli_args?: string[];
+  std_in?: object; // Maybe string and then loaded later
 }
 
 export interface TaskCredential {

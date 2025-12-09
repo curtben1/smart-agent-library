@@ -1,26 +1,18 @@
-export interface SignedTaskCredential {
-  "@context": string[];
-  id: string;
-  type: string[];
-  issuer: string;
-  validFrom: string;
-  credentialSubject: {
-    "task-id": string;
-    action: string;
-    name?: string;
-    location?: string;
-    source?: string;
-    "task_finished-indicator"?: string;
-    cli_args?: string;
-    [key: string]: any;
-  };
-  proof: {
-    type: string;
-    created: string;
-    proofPurpose: string;
-    verificationMethod: string;
-    proofValue: string;
-  };
+import { VerifiableCredential } from "verifiable-credential-toolkit";
+
+export interface SignedTaskCredential extends VerifiableCredential {
+    credentialSubject: {
+        "task-id": string;
+        action: string;
+        name?: string;
+        location?: string;
+        source?: string;
+        "task_finished-indicator"?: string;
+        cli_args?: string;
+        std_in?: object
+        [key: string]: any;
+        translation_schema?: object;
+    };
 }
 
 export interface SignedTaskCredentialWrapper {
