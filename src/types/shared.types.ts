@@ -3,7 +3,7 @@ import { VerifiableCredential } from "verifiable-credential-toolkit";
 export interface SignedTaskCredential extends VerifiableCredential {
     credentialSubject: {
         "task-id": string;
-        action: string;
+        action: "new-task" | "run-task" | "task-version" | "uninstall-task" | "task-status";
         name?: string;
         location?: string;
         source?: string;
@@ -12,6 +12,8 @@ export interface SignedTaskCredential extends VerifiableCredential {
         std_in?: object
         [key: string]: any;
         translation_schema?: object;
+        continuous?: boolean;
+
     };
 }
 

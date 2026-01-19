@@ -412,8 +412,7 @@ export function installTask(taskID: string, taskName: string, taskLocation: stri
     getMapFromSubDoc(taskList).set(taskID, { credential: taskVC });
 }
 
-interface StartTaskInputArgs 
-     { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string }
+interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean }
 
 /**
  * @deprecated
@@ -435,15 +434,15 @@ export function startTask(taskID: string, taskList: Y.Doc, cli_args: string): vo
  * Creates and adds a signed start task to the task list.
  * @param input_args - Object containing taskID, taskList, and optional std_in/cli_args.
  */
-export function startTask(input_args:StartTaskInputArgs): void;
+export function startTask(input_args: StartTaskInputArgs): void;
 export function startTask( //TODO: add in translation schemas somehow
-    taskIDOrArgs: string | { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string },
+    taskIDOrArgs: string | StartTaskInputArgs,
     taskList?: Y.Doc,
     cli_args?: string
 ): void {
     // Handle legacy signature
     if (typeof taskIDOrArgs === 'string') {
-        const taskDetails:SignedTaskCredential["credentialSubject"] = { "task-id": taskIDOrArgs, "action": "run-task" };
+        const taskDetails: SignedTaskCredential["credentialSubject"] = { "task-id": taskIDOrArgs, "action": "run-task", "continuous": false };
         cli_args ? taskDetails["cli_args"] = cli_args : null;
         const taskVC2 = create_signed_task(taskDetails);
         getMapFromSubDoc(taskList!).set(v4(), { credential: taskVC2 });
@@ -451,23 +450,23 @@ export function startTask( //TODO: add in translation schemas somehow
     }
 
     // Handle new object signature
-    const { taskID, taskList: tl, std_in, cli_args: ca } = taskIDOrArgs;
+    const { taskID, taskList: tl, std_in, cli_args: ca, continuous } = taskIDOrArgs;
     let taskVC2: SignedTaskCredential;
     if (ca && std_in) {
-        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "cli_args": ca, "std_in": std_in });
+        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "cli_args": ca, "std_in": std_in, "continuous": continuous });
     } else if (ca) {
-        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "cli_args": ca });
+        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "cli_args": ca, "continuous": continuous });
     } else if (std_in) {
-        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "std_in": std_in });
+        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "std_in": std_in, "continuous": continuous });
     } else {
-        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task" });
+        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "continuous": continuous });
     }
     getMapFromSubDoc(tl).set(v4(), { credential: taskVC2 });
 }
 
 export function startTaskWithStdin(taskID: string, taskList: Y.Doc, std_in: object) {
-    startTask({taskID: taskID, taskList: taskList, std_in: std_in});
-    
+    startTask({ taskID: taskID, taskList: taskList, std_in: std_in });
+
 }
 /**
  * Creates and adds a signed start task to the task list. runtask
@@ -476,7 +475,7 @@ export function startTaskWithStdin(taskID: string, taskList: Y.Doc, std_in: obje
  * @param  cli_args - Command-line arguments to pass to the agent.
  */
 export function startTaskWithCliArgs(taskID: string, taskList: Y.Doc, cli_args: string) {
-    startTask({taskID: taskID, taskList: taskList, cli_args: cli_args});
+    startTask({ taskID: taskID, taskList: taskList, cli_args: cli_args });
 }
 
 
@@ -572,7 +571,7 @@ export function getTaskStatus(taskID: string, taskList: Y.Doc) {
 
 
 export function create_signed_task(task: SignedTaskCredential["credentialSubject"]): SignedTaskCredential {
-    
+
     // turn the task into a vc and sign it
     const validFrom = new Date().toISOString();
     logger.info("task: %o", task);
