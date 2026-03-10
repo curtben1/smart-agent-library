@@ -13,6 +13,7 @@ import { SignedTaskCredential } from "./types/shared.types";
 import { TaskMetadata } from "./types/config.types";
 import { PublishWireRequest, PublishWireResponse, Resource, SaveResourceRequest, Status, SubscribeWireResponse } from "./types/volt.types";
 import { cli } from "winston/lib/winston/config";
+import { writeFieldToSynapseSubdoc } from "./agent_schemas";
 
 // Self-contained logger configuration
 const logger = winston.createLogger({
@@ -123,7 +124,9 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
         source: "http",
         "task_finished-indicator": task_finished_indicator
     });
-    taskListMap.set(taskID, { credential: taskVC });
+    // taskListMap.set(taskID, { credential: taskVC });
+    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: taskVC }, taskList.guid, "")
+
 
     try {
         const wireSubscription = await subscribeToWire(taskID);
@@ -132,11 +135,15 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
                 logger.info("task finished indicator found in wire data");
                 callback(taskID, taskOutputsMap.get(taskID), taskListMap, taskOutputsMap, spareArgs);
                 const uninstall_task_vc = create_signed_task({ "task-id": taskID, "action": "uninstall-task", "name": "uninstall_task" });
-                taskListMap.set(taskID, { credential: uninstall_task_vc });
+                // taskListMap.set(taskID, { credential: uninstall_task_vc });
+                writeFieldToSynapseSubdoc(voltClient, taskID, { credential: uninstall_task_vc }, taskList.guid, "")
+
             } else if (chunk.includes("task-failed-" + taskID)) {
                 logger.info("task failed indicator found in wire data");
                 const uninstall_task_vc = create_signed_task({ "task-id": taskID, "action": "uninstall-task", "name": "uninstall_task" });
-                taskListMap.set(taskID, { credential: uninstall_task_vc });
+                // taskListMap.set(taskID, { credential: uninstall_task_vc });
+                writeFieldToSynapseSubdoc(voltClient, taskID, { credential: uninstall_task_vc }, taskList.guid, "")
+
             }
         });
     } catch (error) {
@@ -152,6 +159,8 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
 
     });
     taskListMap.set(taskID, { credential: run_task_vc });
+    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: run_task_vc }, taskList.guid, "")
+
 }
 
 
@@ -339,7 +348,7 @@ export async function subscribeToWire(wireName: string): Promise<WireSubscriptio
 
         wireStream.on("error", (error: Error) => {
 
-            logger.error("Error in wire stream: %o", error);
+            logger.error(`Error in wire stream for wireName ${wireName}: %o`, error);
             if (errorCallbacks.size > 0) {
                 errorCallbacks.forEach(errorCallback => errorCallback(error));
             } else {
@@ -358,8 +367,16 @@ export async function subscribeToWire(wireName: string): Promise<WireSubscriptio
             },
             getAllData: () => [...chunks],
             close: () => {
-                wireStream.cancel();
+                if (typeof wireStream.destroy === 'function') {
+                    wireStream.destroy();
+                } else if (typeof wireStream.end === 'function') {
+                    wireStream.end();
+                } else if (typeof wireStream.cancel === 'function') {
+                    wireStream.cancel();
+                }
                 callbacks.clear();
+                errorCallbacks.clear();
+
             }
         }
 
@@ -409,7 +426,8 @@ function getMapFromSubDoc<T = unknown>(subdoc: Y.Doc): Y.Map<T> {
  */
 export function installTask(taskID: string, taskName: string, taskLocation: string, sourceType: string, taskList: Y.Doc) {
     const taskVC = create_signed_task({ "task-id": taskID, "action": "new-task", "name": taskName, "location": taskLocation, source: sourceType });
-    getMapFromSubDoc(taskList).set(taskID, { credential: taskVC });
+    // getMapFromSubDoc(taskList).set(taskID, { credential: taskVC });
+    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: taskVC }, taskList.guid, "");
 }
 
 interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean }
@@ -445,7 +463,12 @@ export function startTask( //TODO: add in translation schemas somehow
         const taskDetails: SignedTaskCredential["credentialSubject"] = { "task-id": taskIDOrArgs, "action": "run-task", "continuous": false };
         cli_args ? taskDetails["cli_args"] = cli_args : null;
         const taskVC2 = create_signed_task(taskDetails);
-        getMapFromSubDoc(taskList!).set(v4(), { credential: taskVC2 });
+        // getMapFromSubDoc(taskList!).set(v4(), { credential: taskVC2 });
+        if (taskList) {
+
+            writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC2 }, taskList.guid, "")
+        }
+
         return;
     }
 
@@ -461,7 +484,9 @@ export function startTask( //TODO: add in translation schemas somehow
     } else {
         taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "continuous": continuous });
     }
-    getMapFromSubDoc(tl).set(v4(), { credential: taskVC2 });
+    // getMapFromSubDoc(tl).set(v4(), { credential: taskVC2 });
+    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC2 }, tl.guid, "")
+
 }
 
 export function startTaskWithStdin(taskID: string, taskList: Y.Doc, std_in: object) {
@@ -488,32 +513,54 @@ export function startTaskWithCliArgs(taskID: string, taskList: Y.Doc, cli_args: 
 export async function waitForTaskFinished(taskID: string): Promise<void> {
     const task_finished_indicator = `task-finished-${taskID}`;
     logger.info("Waiting for task to finish with ID:", taskID);
-    return new Promise(async (resolve, reject) => {
-        try {
-            const wireSubscription = await subscribeToWire(taskID);
-            logger.info("Subscribed to wire for task ID:", taskID);
-            wireSubscription.onData((chunk: string, allChunks: string[], error: Error) => {
-                logger.info("chunk received: %s", chunk);
-                if (error) {
-                    logger.info("Error receiving task finished indicator: %o", error);
-                    wireSubscription.close();
-                    reject(error);
+    let retries = 0;
+    const maxRetries = 100
 
+    const trySubscribe = (): Promise<void> => {
+        return new Promise(async (resolve, reject) => {
+            try {
+                const wireSubscription = await subscribeToWire(taskID);
+                logger.info("Subscribed to wire for task ID:", taskID);
+                wireSubscription.onData((chunk: string, allChunks: string[], error: Error) => {
+                    logger.info("chunk received: %s", chunk);
+                    if (error) {
+                        logger.info("Error receiving task finished indicator: %o", error);
+                        wireSubscription.close();
+                        reject(error);
+                    }
+                    if (chunk.includes(task_finished_indicator)) {
+                        logger.info("task finished indicator found in wire data");
+                        resolve();
+                    }
+                    if (chunk.includes("task-failed-" + taskID)) {
+                        logger.info("task failed indicator found in wire data");
+                        reject(new Error("Task failed"));
+                    }
+                });
+
+                wireSubscription.onError(async (error: Error) => {
+                    wireSubscription.close();
+                    if (retries < maxRetries) {
+                        retries++;
+                        logger.info(`Wire subscription failed, retrying (${retries}/${maxRetries})...`);
+                        await new Promise(r => setTimeout(r, 1000 * retries)); // Exponential backoff
+                        resolve(trySubscribe());
+                    } else {
+                        reject(error);
+                    }
+                });
+            } catch (error) {
+                if (retries < maxRetries) {
+                    retries++;
+                    await new Promise(r => setTimeout(r, 1000 * retries));
+                    resolve(trySubscribe());
+                } else {
+                    reject(error);
                 }
-                if (chunk.includes(task_finished_indicator)) {
-                    logger.info("task finished indicator found in wire data");
-                    resolve();
-                }
-                if (chunk.includes("task-failed-" + taskID)) {
-                    logger.info("task failed indicator found in wire data");
-                    reject(new Error("Task failed"));
-                }
-            });
-        } catch (error) {
-            logger.warn("error subscribing to wire: %o", error);
-            reject(error);
-        }
-    });
+            }
+        });
+    };
+    return trySubscribe();
 }
 
 /**
@@ -523,7 +570,9 @@ export async function waitForTaskFinished(taskID: string): Promise<void> {
  */
 export function uninstallTask(taskID: string, taskList: Y.Doc) {
     const taskVC3 = create_signed_task({ "task-id": taskID, "action": "uninstall-task" })
-    getMapFromSubDoc(taskList).set(v4(), { credential: taskVC3 });
+    // getMapFromSubDoc(taskList).set(v4(), { credential: taskVC3 });
+    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC3 }, taskList.guid, "")
+
 }
 
 
@@ -540,7 +589,9 @@ export function getTaskMetadata(taskID: string, taskList: Y.Doc): Promise<TaskMe
     const metadataPromise = new Promise<TaskMetadata>((resolve, reject) => {
         handleWireSubscription(resolve, reject, taskID);
     });
-    getMapFromSubDoc(taskList).set(v4(), { credential: taskVersionVC });
+    // getMapFromSubDoc(taskList).set(v4(), { credential: taskVersionVC });
+    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVersionVC }, taskList.guid, "")
+
     return metadataPromise;
 
 }
@@ -566,6 +617,8 @@ export function getTaskStatus(taskID: string, taskList: Y.Doc) {
         }
     });
     getMapFromSubDoc(taskList).set(v4(), { credential: taskStatusVC });
+    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskStatusVC }, taskList.guid, "")
+
     return taskStatusPromise;
 }
 
@@ -713,6 +766,7 @@ export async function getTaskOutputJson(ydoc: Y.Doc, taskId: string): Promise<st
             externalPumpDoc = new Y.Doc();
             logger.info("Creating new external pumps doc");
             rootDocumentMap.set("externalPumps", externalPumpDoc);
+
         }
         externalPumpDoc.load();
         await waitForDocSync(externalPumpDoc);
