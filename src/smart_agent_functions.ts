@@ -15,6 +15,10 @@ import { PublishWireRequest, PublishWireResponse, Resource, SaveResourceRequest,
 import { cli } from "winston/lib/winston/config";
 import { writeFieldToSynapseSubdoc } from "./agent_schemas";
 
+
+const mapname = "GENERIC_MAP_NAME";
+
+
 // Self-contained logger configuration
 const logger = winston.createLogger({
     level: process.env.LOG_LEVEL || 'info',
@@ -414,7 +418,7 @@ export function initialiseSubDocs(agentStateMap: Y.Map<Y.Doc>) {
  */
 function getMapFromSubDoc<T = unknown>(subdoc: Y.Doc): Y.Map<T> {
     subdoc.load();
-    return subdoc.getMap();
+    return subdoc.getMap(mapname);
 }
 
 /**
@@ -760,7 +764,7 @@ export async function waitForDocSync(doc: Y.Doc) {
 export async function getTaskOutputJson(ydoc: Y.Doc, taskId: string): Promise<string> {
 
     return new Promise(async (resolve, reject) => {
-        const rootDocumentMap: Y.Map<Y.Doc> = ydoc.getMap();
+        const rootDocumentMap: Y.Map<Y.Doc> = ydoc.getMap(mapname);
         let externalPumpDoc = rootDocumentMap.get("externalPumps");
         if (!externalPumpDoc) {
             externalPumpDoc = new Y.Doc();
@@ -771,7 +775,7 @@ export async function getTaskOutputJson(ydoc: Y.Doc, taskId: string): Promise<st
         externalPumpDoc.load();
         await waitForDocSync(externalPumpDoc);
 
-        let externalPumpMap: Y.Map<Y.Doc> = externalPumpDoc.getMap();
+        let externalPumpMap: Y.Map<Y.Doc> = externalPumpDoc.getMap(mapname);
         if (!externalPumpMap) {
             reject("No output found for taskId: " + taskId);
             return;
