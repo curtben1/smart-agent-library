@@ -1,5 +1,6 @@
 // @ts-expect-error - Using JS module without types
 import { VoltClient } from "@tdxvolt/volt-client-grpc"
+import { add } from "winston";
 
 
 const SYNAPSE_ID = "@agent-synapse-1";
@@ -112,6 +113,10 @@ const TASK_LIST_SCHEMA = JSON.stringify({
                 ],
                 description: "Task action type",
               },
+              name: {
+                type: "string",
+                description: "Human-readable task name (for new-task)",
+              },
               location: {
                 type: "string",
                 description:
@@ -146,6 +151,7 @@ const TASK_LIST_SCHEMA = JSON.stringify({
               },
             },
             required: ["task-id", "action"],
+            additionalProperties: true,
           },
           proof: {
             type: "object",
@@ -169,6 +175,7 @@ const TASK_LIST_SCHEMA = JSON.stringify({
       },
     },
     required: ["credential"],
+    additionalProperties: true,
   },
 });
 
@@ -229,27 +236,67 @@ const CARRIER_INSTANCE_SCHEMA = JSON.stringify({
   },
 });
 
+
+// async function writeFieldToSynapseSubdoc(voltClient: VoltClient, field: string, value: object, documentId: string, pathPrefix: string) {
+//   // Write each property individually, since WriteSynapsePath expects leaf values
+//   const entries = Object.entries(value);
+
+//   for (const [key, val] of entries) {
+//     const jsonPath = `$.${pathPrefix}.${field}.${key}`;
+
+//     try {
+//       console.log("WriteSynapsePath args:", {
+//         database_id: SYNAPSE_ID,
+//         document_id: documentId,
+//         path: jsonPath,
+//         json: JSON.stringify(val),
+//       });
+
+//       const resp = await voltClient.WriteSynapsePath({
+//         database_id: SYNAPSE_ID,
+//         document_id: documentId,
+//         path: jsonPath,
+//         json: JSON.stringify(val),
+//       });
+//       if (resp.status?.code) {
+//         throw new Error(`WriteSynapsePath failed for path ${jsonPath}: ${resp.status.message}`);
+//       }
+//     } catch (e) {
+//       console.error(`Error writing to Synapse subdoc ${documentId} path ${jsonPath} with content ${JSON.stringify(val)}:`, e);
+//       throw e;
+//     }
+//   }
+// }
+
+
 async function writeFieldToSynapseSubdoc(voltClient: VoltClient, field: string, value: object, documentId: string, pathPrefix: string) {
-  const jsonPath = pathPrefix ? `$.${pathPrefix}.${field}` : `$.${field}`;
+  const jsonPath = `$.${pathPrefix}.${field}`;
 
   try {
+    console.log("WriteSynapsePath args:", {
+      synapse_id: SYNAPSE_ID,
+      document_id: documentId,
+      path: jsonPath,
+      json: JSON.stringify(value),
+    });
 
     const resp = await voltClient.WriteSynapsePath({
+      synapse_id: SYNAPSE_ID,
       database_id: SYNAPSE_ID,
       document_id: documentId,
       path: jsonPath,
       json: JSON.stringify(value),
     });
     if (resp.status?.code) {
-      throw new Error(`WriteSynapsePath failed: ${resp.status.message}`);
+      throw new Error(`WriteSynapsePath failed for path ${jsonPath}: ${resp.status.message}`);
     }
     return resp;
-  }
-  catch (e) {
-    console.error(`Error writing to Synapse subdoc ${documentId} field ${field} with content ${JSON.stringify(value)}:`, e);
+  } catch (e) {
+    console.error(`Error writing to Synapse subdoc ${documentId} path ${jsonPath} with content ${JSON.stringify(value)}:`, e);
     throw e;
   }
 }
+
 
 // === SETUP FUNCTION ===
 

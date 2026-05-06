@@ -13,8 +13,9 @@ import { SignedTaskCredential } from "./types/shared.types";
 import { TaskMetadata } from "./types/config.types";
 import { PublishWireRequest, PublishWireResponse, Resource, SaveResourceRequest, Status, SubscribeWireResponse } from "./types/volt.types";
 import { cli } from "winston/lib/winston/config";
-import { writeFieldToSynapseSubdoc } from "./agent_schemas";
-
+import { writeFieldToSynapseSubdoc } from "./agent_schemas.js";
+import { EXTERNAL_PUMP_TASK_SCHEMA, SYNAPSE_ID } from "./agent_schemas.js";
+import { YArray } from "yjs/dist/src/internals";
 
 const mapname = "GENERIC_MAP_NAME";
 
@@ -129,7 +130,7 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
         "task_finished-indicator": task_finished_indicator
     });
     // taskListMap.set(taskID, { credential: taskVC });
-    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: taskVC }, taskList.guid, "")
+    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: taskVC }, taskList.guid, mapname)
 
 
     try {
@@ -140,13 +141,13 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
                 callback(taskID, taskOutputsMap.get(taskID), taskListMap, taskOutputsMap, spareArgs);
                 const uninstall_task_vc = create_signed_task({ "task-id": taskID, "action": "uninstall-task", "name": "uninstall_task" });
                 // taskListMap.set(taskID, { credential: uninstall_task_vc });
-                writeFieldToSynapseSubdoc(voltClient, taskID, { credential: uninstall_task_vc }, taskList.guid, "")
+                writeFieldToSynapseSubdoc(voltClient, taskID, { credential: uninstall_task_vc }, taskList.guid, mapname)
 
             } else if (chunk.includes("task-failed-" + taskID)) {
                 logger.info("task failed indicator found in wire data");
                 const uninstall_task_vc = create_signed_task({ "task-id": taskID, "action": "uninstall-task", "name": "uninstall_task" });
                 // taskListMap.set(taskID, { credential: uninstall_task_vc });
-                writeFieldToSynapseSubdoc(voltClient, taskID, { credential: uninstall_task_vc }, taskList.guid, "")
+                writeFieldToSynapseSubdoc(voltClient, taskID, { credential: uninstall_task_vc }, taskList.guid, mapname)
 
             }
         });
@@ -162,8 +163,8 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
         "cli_args": cli_args
 
     });
-    taskListMap.set(taskID, { credential: run_task_vc });
-    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: run_task_vc }, taskList.guid, "")
+    // taskListMap.set(taskID, { credential: run_task_vc });
+    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: run_task_vc }, taskList.guid, mapname)
 
 }
 
@@ -324,12 +325,16 @@ export async function subscribeToWire(wireName: string): Promise<WireSubscriptio
         const callbacks: Set<Function> = new Set();
         const errorCallbacks: Set<Function> = new Set();
 
-
-        // Default error handler
-        let defaultErrorHandler = (error: Error) => {
-            logger.error("Unhandled wire stream error: %o", error);
-        };
-
+        const canAccess = await voltClient.CanAccessResource({ resource_id: wireName, access: "read" }).catch((error: Error) => {
+            logger.error("Error checking access to wire resource: %o", error);
+        });
+        if (![1, 2, 6, 7, "POLICY_DECISION_PERMIT"].includes(canAccess.decision)) {
+            console.error(`Access denied to wire resource ${wireName}. Decision: ${canAccess.decision}`);
+            // throw new Error(`Access denied to wire resource ${wireName}. Decision: ${canAccess.decision}`);
+        }
+        else {
+            console.log(`Access granted to wire resource ${wireName}. Decision: ${canAccess.decision}`);
+        }
         const wireStream = await voltClient.SubscribeWire({ wire_id: wireName });
         logger.info("wire subscribed for wireName: %s", wireName);
 
@@ -356,7 +361,7 @@ export async function subscribeToWire(wireName: string): Promise<WireSubscriptio
             if (errorCallbacks.size > 0) {
                 errorCallbacks.forEach(errorCallback => errorCallback(error));
             } else {
-                defaultErrorHandler(error);
+                logger.error("Unhandled wire stream error: %o", error);
             }
         });
 
@@ -431,7 +436,7 @@ function getMapFromSubDoc<T = unknown>(subdoc: Y.Doc): Y.Map<T> {
 export function installTask(taskID: string, taskName: string, taskLocation: string, sourceType: string, taskList: Y.Doc) {
     const taskVC = create_signed_task({ "task-id": taskID, "action": "new-task", "name": taskName, "location": taskLocation, source: sourceType });
     // getMapFromSubDoc(taskList).set(taskID, { credential: taskVC });
-    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: taskVC }, taskList.guid, "");
+    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: taskVC }, taskList.guid, mapname);
 }
 
 interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean }
@@ -470,7 +475,7 @@ export function startTask( //TODO: add in translation schemas somehow
         // getMapFromSubDoc(taskList!).set(v4(), { credential: taskVC2 });
         if (taskList) {
 
-            writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC2 }, taskList.guid, "")
+            writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC2 }, taskList.guid, mapname)
         }
 
         return;
@@ -489,7 +494,7 @@ export function startTask( //TODO: add in translation schemas somehow
         taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "continuous": continuous });
     }
     // getMapFromSubDoc(tl).set(v4(), { credential: taskVC2 });
-    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC2 }, tl.guid, "")
+    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC2 }, tl.guid, mapname)
 
 }
 
@@ -575,7 +580,7 @@ export async function waitForTaskFinished(taskID: string): Promise<void> {
 export function uninstallTask(taskID: string, taskList: Y.Doc) {
     const taskVC3 = create_signed_task({ "task-id": taskID, "action": "uninstall-task" })
     // getMapFromSubDoc(taskList).set(v4(), { credential: taskVC3 });
-    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC3 }, taskList.guid, "")
+    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC3 }, taskList.guid, mapname)
 
 }
 
@@ -594,7 +599,7 @@ export function getTaskMetadata(taskID: string, taskList: Y.Doc): Promise<TaskMe
         handleWireSubscription(resolve, reject, taskID);
     });
     // getMapFromSubDoc(taskList).set(v4(), { credential: taskVersionVC });
-    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVersionVC }, taskList.guid, "")
+    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVersionVC }, taskList.guid, mapname)
 
     return metadataPromise;
 
@@ -620,8 +625,8 @@ export function getTaskStatus(taskID: string, taskList: Y.Doc) {
             reject(error);
         }
     });
-    getMapFromSubDoc(taskList).set(v4(), { credential: taskStatusVC });
-    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskStatusVC }, taskList.guid, "")
+    // getMapFromSubDoc(taskList).set(v4(), { credential: taskStatusVC });
+    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskStatusVC }, taskList.guid, mapname)
 
     return taskStatusPromise;
 }
@@ -725,6 +730,120 @@ export function observeTaskOutputs(taskOutputs: Y.Doc, taskID: string) {
             }
         }
     });
+}
+
+async function set_subdoc_schema(subdoc_id: string, schema: string) {
+    try {
+        const mainSchemaResp = await voltClient.SetSynapseDocumentMetadata({
+            database_id: SYNAPSE_ID,
+            document_id: subdoc_id,
+            metadata: [{
+                name: mapname,
+                type: "map",
+                json_schema: schema,
+            }],
+        });
+        if (mainSchemaResp.status?.code) {
+            throw new Error(
+                `Failed to set main doc schema: ${mainSchemaResp.status.message}`,
+            );
+        } else {
+            logger.info(`Set schema for subdoc ${subdoc_id}: %s`, schema);
+        }
+
+    } catch (err) {
+        console.error(`Error in set_subdoc_schema for ${subdoc_id}:`, err);
+        throw err;
+    }
+}
+
+
+
+
+export async function* streamContinuousTaskOutput(rootDoc: Y.Doc, taskId: string): AsyncGenerator<object> {
+    const rootDocumentMap: Y.Map<Y.Doc> = rootDoc.getMap(mapname);
+    let externalPumpDoc = rootDocumentMap.get("externalPumps");
+    let timer = 0;
+    while (!externalPumpDoc) {
+        // wait and check again, in case the doc is being created by another agent at the same time
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        timer++;
+        externalPumpDoc = rootDocumentMap.get("externalPumps");
+        if (timer > 30) { // after 30 seconds of waiting, throw an error
+            throw new Error("No external pumps doc found");
+        }
+    }
+    externalPumpDoc.load();
+    await waitForDocSync(externalPumpDoc);
+
+    let externalPumpMap: Y.Map<Y.Doc> = externalPumpDoc.getMap(mapname);
+    if (!externalPumpMap) {
+        throw new Error("No external pump map found");
+    }
+    if (!externalPumpMap.has(taskId)) {
+        externalPumpMap.set(taskId, new Y.Doc({ guid: taskId }));
+        const taskPump = externalPumpMap.get(taskId)
+        if (!taskPump) {
+            throw new Error("Failed to create task pump doc for taskId: " + taskId);
+        }
+        waitForDocSync(taskPump).then(() => {
+            set_subdoc_schema(taskId, EXTERNAL_PUMP_TASK_SCHEMA);
+        });
+    }
+
+    const taskPumpDoc = externalPumpMap.get(taskId);
+    if (!taskPumpDoc) {
+        throw new Error("No task pump doc found for taskId: " + taskId);
+    }
+    taskPumpDoc.load();
+    await waitForDocSync(taskPumpDoc);
+    let taskPumpArray: YArray<object> = taskPumpDoc.getArray("resultArray");
+    for (let i = 0; i < taskPumpArray.length; i++) {
+        const value = taskPumpArray.get(i);
+        if (value) {
+            logger.info("Existing continuous output chunk: %s", value);
+            yield value;
+        }
+    }
+
+    const queue: object[] = [];
+    let wake: (() => void) | null = null;
+
+    const push = (value: object) => {
+        queue.push(value);
+        if (wake) {
+            wake();
+            wake = null;
+        }
+    };
+
+    const observeLogic = (event: Y.YArrayEvent<object>) => {
+        for (const deltaItem of event.changes.delta) {
+            if ("insert" in deltaItem && Array.isArray(deltaItem.insert)) {
+                for (const inserted of deltaItem.insert) {
+                    if (inserted) {
+                        logger.info("New continuous output chunk: %s", inserted);
+                        push(inserted);
+                    }
+                }
+            }
+        }
+    };
+
+    taskPumpArray.observe(observeLogic);
+
+    try {
+        while (true) {
+            if (queue.length === 0) {
+                await new Promise<void>((resolve) => { wake = resolve; });
+            }
+            while (queue.length > 0) {
+                yield queue.shift() as object;
+            }
+        }
+    } finally {
+        taskPumpArray.unobserve(observeLogic);
+    }
 }
 
 /**
