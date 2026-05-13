@@ -329,7 +329,7 @@ export async function subscribeToWire(wireName: string): Promise<WireSubscriptio
             logger.error("Error checking access to wire resource: %o", error);
         });
         if (![1, 2, 6, 7, "POLICY_DECISION_PERMIT"].includes(canAccess.decision)) {
-            console.error(`Access denied to wire resource ${wireName}. Decision: ${canAccess.decision}`);
+            console.warn(`Access denied to wire resource ${wireName}. Decision: ${canAccess.decision} \n This process will be retried, expect some warnings in the logs while waiting for retries`);
             // throw new Error(`Access denied to wire resource ${wireName}. Decision: ${canAccess.decision}`);
         }
         else {
@@ -357,7 +357,7 @@ export async function subscribeToWire(wireName: string): Promise<WireSubscriptio
 
         wireStream.on("error", (error: Error) => {
 
-            logger.error(`Error in wire stream for wireName ${wireName}: %o`, error);
+            logger.warn(`Error in wire stream for wireName ${wireName}: ${error} - you can ignore this safely unless other breakages occur, likely due to wire creation delays`);
             if (errorCallbacks.size > 0) {
                 errorCallbacks.forEach(errorCallback => errorCallback(error));
             } else {
