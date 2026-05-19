@@ -13,7 +13,7 @@ export interface SignedTaskCredential extends VerifiableCredential {
         [key: string]: any;
         translation_schema?: object;
         continuous?: boolean;
-
+        outer_output_pump_location?: string;
     };
 }
 

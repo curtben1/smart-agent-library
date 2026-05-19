@@ -439,7 +439,9 @@ export function installTask(taskID: string, taskName: string, taskLocation: stri
     writeFieldToSynapseSubdoc(voltClient, taskID, { credential: taskVC }, taskList.guid, mapname);
 }
 
-interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean }
+interface Synapse_Write_Object { synapse_id: string, document_id: string, path: string }
+
+interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, synapse_write_path?: Synapse_Write_Object }
 
 /**
  * @deprecated
@@ -482,20 +484,31 @@ export function startTask( //TODO: add in translation schemas somehow
     }
 
     // Handle new object signature
-    const { taskID, taskList: tl, std_in, cli_args: ca, continuous } = taskIDOrArgs;
+    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, synapse_write_path } = taskIDOrArgs;
     let taskVC2: SignedTaskCredential;
-    if (ca && std_in) {
-        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "cli_args": ca, "std_in": std_in, "continuous": continuous });
-    } else if (ca) {
-        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "cli_args": ca, "continuous": continuous });
-    } else if (std_in) {
-        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "std_in": std_in, "continuous": continuous });
-    } else {
-        taskVC2 = create_signed_task({ "task-id": taskID, "action": "run-task", "continuous": continuous });
-    }
-    // getMapFromSubDoc(tl).set(v4(), { credential: taskVC2 });
-    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC2 }, tl.guid, mapname)
+    if (outer_output_pump_location) {
+        logger.warn("This form of custom location will be deprecated once the volt schema issues are resolved, synapse_write_path is preferred and will be the primary future method.")
 
+    }
+    const baseTask: SignedTaskCredential["credentialSubject"] = {
+        "task-id": taskID,
+        action: "run-task",
+        ...(continuous !== undefined ? { continuous } : {}),
+        ...(outer_output_pump_location ? { outer_output_pump_location } : {}),
+        ...(synapse_write_path ? { synapse_write_path } : {})
+    };
+
+    if (ca && std_in) {
+        taskVC2 = create_signed_task({ ...baseTask, cli_args: ca, std_in });
+    } else if (ca) {
+        taskVC2 = create_signed_task({ ...baseTask, cli_args: ca });
+    } else if (std_in) {
+        taskVC2 = create_signed_task({ ...baseTask, std_in });
+    } else {
+        taskVC2 = create_signed_task(baseTask);
+    }
+
+    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC2 }, tl.guid, mapname)
 }
 
 export function startTaskWithStdin(taskID: string, taskList: Y.Doc, std_in: object) {

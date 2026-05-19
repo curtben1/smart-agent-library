@@ -1,6 +1,6 @@
 {
   "name": "@nqminds/smart-agent-functions",
-  "version": "1.4.0",
+  "version": "1.4.2",
   "main": "dist/smart_agent_functions.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
