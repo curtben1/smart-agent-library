@@ -68,7 +68,7 @@ const TASK_LIST_SCHEMA = JSON.stringify({
   type: "object",
   additionalProperties: {
     type: "object",
-    description: "Task entry keyed by agentId (UUID)",
+    description: "Task entry keyed by task ID (UUID)",
     properties: {
       credential: {
         type: "object",
@@ -130,6 +130,7 @@ const TASK_LIST_SCHEMA = JSON.stringify({
               std_in: {
                 type: "object",
                 description: "Structured stdin input (for run-task)",
+                additionalProperties: true,
               },
               cli_args: {
                 type: "string",
@@ -149,6 +150,28 @@ const TASK_LIST_SCHEMA = JSON.stringify({
                 description:
                   "Source JSON schema (used with translation_schema)",
               },
+              outer_output_pump_location: {
+                type: "string",
+                description:
+                  "Where on the synapse you want the data to be written to. Should be custom path format described in root readme, '.' separated mapname, ':' separated keys'",
+              },
+              synapse_write_path: {
+                type: "object",
+                description:
+                  "Where to write a copy of the output using WriteSynapsePath",
+                properties: {
+                  synapse_id: { type: "string" },
+                  document_id: { type: "string" },
+                  path: { type: "string" },
+                },
+                required: ["synapse_id", "document_id", "path"],
+                additionalProperties: false,
+              },
+              execute_after_timestamp_ms: {
+                type: "number",
+                description:
+                  "If set, the task will not be eligible for assignment until the specified Unix timestamp in milliseconds",
+              },
             },
             required: ["task-id", "action"],
             additionalProperties: true,
@@ -156,6 +179,7 @@ const TASK_LIST_SCHEMA = JSON.stringify({
           proof: {
             type: "object",
             description: "Cryptographic signature proof",
+            additionalProperties: true,
           },
         },
         required: [

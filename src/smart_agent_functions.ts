@@ -15,6 +15,7 @@ import { PublishWireRequest, PublishWireResponse, Resource, SaveResourceRequest,
 import { cli } from "winston/lib/winston/config";
 import { writeFieldToSynapseSubdoc } from "./agent_schemas.js";
 import { EXTERNAL_PUMP_TASK_SCHEMA, SYNAPSE_ID } from "./agent_schemas.js";
+// @ts-ignore
 import { YArray } from "yjs/dist/src/internals";
 
 const mapname = "GENERIC_MAP_NAME";
@@ -433,15 +434,16 @@ function getMapFromSubDoc<T = unknown>(subdoc: Y.Doc): Y.Map<T> {
  * @param {string} taskLocation - The location of the task, typically a URL or martketplace uuid TODO: waiting on Toby file size limitation check
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
  */
-export function installTask(taskID: string, taskName: string, taskLocation: string, sourceType: string, taskList: Y.Doc) {
-    const taskVC = create_signed_task({ "task-id": taskID, "action": "new-task", "name": taskName, "location": taskLocation, source: sourceType });
+export function installTask(taskID: string, taskName: string, taskLocation: string, sourceType: string, taskList: Y.Doc, execute_after_timestamp_ms?: number) {
+
+    const taskVC = create_signed_task({ "task-id": taskID, "action": "new-task", "name": taskName, "location": taskLocation, source: sourceType, ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {}) });
     // getMapFromSubDoc(taskList).set(taskID, { credential: taskVC });
     writeFieldToSynapseSubdoc(voltClient, taskID, { credential: taskVC }, taskList.guid, mapname);
 }
 
 interface Synapse_Write_Object { synapse_id: string, document_id: string, path: string }
 
-interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, synapse_write_path?: Synapse_Write_Object }
+interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, synapse_write_path?: Synapse_Write_Object, execute_after_timestamp_ms?: number }
 
 /**
  * @deprecated
@@ -484,7 +486,7 @@ export function startTask( //TODO: add in translation schemas somehow
     }
 
     // Handle new object signature
-    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, synapse_write_path } = taskIDOrArgs;
+    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, synapse_write_path, execute_after_timestamp_ms } = taskIDOrArgs;
     let taskVC2: SignedTaskCredential;
     if (outer_output_pump_location) {
         logger.warn("This form of custom location will be deprecated once the volt schema issues are resolved, synapse_write_path is preferred and will be the primary future method.")
@@ -495,7 +497,8 @@ export function startTask( //TODO: add in translation schemas somehow
         action: "run-task",
         ...(continuous !== undefined ? { continuous } : {}),
         ...(outer_output_pump_location ? { outer_output_pump_location } : {}),
-        ...(synapse_write_path ? { synapse_write_path } : {})
+        ...(synapse_write_path ? { synapse_write_path } : {}),
+        ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {})
     };
 
     if (ca && std_in) {
@@ -590,8 +593,8 @@ export async function waitForTaskFinished(taskID: string): Promise<void> {
  * @param {string} taskID - The unique ID for the task.
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
  */
-export function uninstallTask(taskID: string, taskList: Y.Doc) {
-    const taskVC3 = create_signed_task({ "task-id": taskID, "action": "uninstall-task" })
+export function uninstallTask(taskID: string, taskList: Y.Doc, execute_after_timestamp_ms?: number) {
+    const taskVC3 = create_signed_task({ "task-id": taskID, "action": "uninstall-task", ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {}) });
     // getMapFromSubDoc(taskList).set(v4(), { credential: taskVC3 });
     writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC3 }, taskList.guid, mapname)
 

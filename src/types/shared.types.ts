@@ -14,6 +14,7 @@ export interface SignedTaskCredential extends VerifiableCredential {
         translation_schema?: object;
         continuous?: boolean;
         outer_output_pump_location?: string;
+        execute_after_timestamp_ms?: number;
     };
 }
 
