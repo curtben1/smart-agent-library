@@ -9,7 +9,7 @@ import { v4 as uuidv4, v4 } from "uuid";
 import { sign, verify } from "verifiable-credential-toolkit";
 import winston from 'winston';
 import { Sign } from "crypto";
-import { SignedTaskCredential } from "./types/shared.types";
+import { SignedTaskCredential, SignedTaskCredentialWrapper } from "./types/shared.types";
 import { TaskMetadata } from "./types/config.types";
 import { PublishWireRequest, PublishWireResponse, Resource, SaveResourceRequest, Status, SubscribeWireResponse } from "./types/volt.types";
 import { cli } from "winston/lib/winston/config";
@@ -1027,3 +1027,31 @@ function getPrivateKey() {
     ]);
 }
 
+
+export async function waitForTaskAssigned(taskId: string, taskListDoc: Y.Doc, maxAttemptsCreation = 5, maxAttemptsAssignment = 1000) {
+    taskListDoc.load();
+    const taskList: Y.Map<SignedTaskCredentialWrapper> = taskListDoc.getMap(mapname);
+    let attempts = 0;
+    let taskEntry = taskList.get(taskId);
+    while (!taskEntry) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        taskEntry = taskList.get(taskId);
+        attempts++;
+        if (attempts >= maxAttemptsCreation) {
+            throw new Error(`Task ${taskId} was not created after ${maxAttemptsCreation} attempts`);
+        }
+    }
+    attempts = 0;
+
+    while (!(taskEntry as SignedTaskCredentialWrapper).assigned && attempts < maxAttemptsAssignment) {
+        taskListDoc.load();
+        taskEntry = taskList.get(taskId);
+        await new Promise(resolve => setTimeout(resolve, 500));
+        attempts++;
+    }
+    if (attempts >= maxAttemptsAssignment) {
+        return taskEntry?.assigned;
+    }
+    throw new Error(`Task ${taskId} was not assigned after ${maxAttemptsAssignment} attempts, agent network is likely busy, perhaps with stale agents`);
+
+} 
