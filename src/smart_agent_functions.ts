@@ -7,7 +7,7 @@ import { VoltClient } from "@tdxvolt/volt-client-grpc";
 import * as Y from "yjs";
 import { v4 as uuidv4, v4 } from "uuid";
 import { sign, verify } from "verifiable-credential-toolkit";
-import winston from 'winston';
+import winston, { log } from 'winston';
 import { Sign } from "crypto";
 import { SignedTaskCredential } from "./types/shared.types";
 import { TaskMetadata } from "./types/config.types";
@@ -55,9 +55,8 @@ const logger = winston.createLogger({
     ]
 });
 
-// Method 1: Change the logger level to disable info logs
 // This will only show warn and error logs
-logger.level = 'warn';
+logger.level = 'info';
 
 
 /**
@@ -86,222 +85,9 @@ export async function getAndInitialiseVoltClient(voltConfig: string): Promise<Vo
 
 }
 
-interface InstallAndLaunchParams {
-    agent_name: string;
-    zip: string;
-    callback: (taskID: string, taskOutput: any, taskListMap: Y.Map<any>, taskOutputsMap: Y.Map<any>, spareArgs: any) => void;
-    cli_args?: string;
-    taskList: Y.Doc;
-    taskOutputs: Y.Doc;
-    spareArgs: any;
-}
-
-/**
- * Installs and launches a new agent task, subscribes to its wire, and observes outputs.
- * 
- * @param {Object} params - Parameters for installing and launching the agent.
- * @param {string} params.agent_name - The name of the agent to install and launch.
- * @param {string} params.zip - The URL or location of the agent zip file.
- * @param {Function} params.callback - Callback function to execute when the task finishes.
- * @param {string} [params.cli_args] - Command-line arguments to pass to the agent (optional).
- * @param {Y.Doc} params.taskList - Yjs Doc (subdoc) containing a YMap to store tasks and their credentials.
- * @param {Y.Map} params.taskOutputs - Yjs map to store outputs from tasks.
- * @param {Object} params.spareArgs - Additional arguments to pass to the callback.
- * @returns {Promise<void>} Resolves when the task is installed and launched.
- */
-export async function install_and_launch({ agent_name, zip, callback, cli_args, taskList, taskOutputs, spareArgs }: InstallAndLaunchParams): Promise<void> {
-    if (!cli_args) {
-        logger.info("no cli_args provided, setting to empty string");
-        cli_args = "";
-    }
-
-    const taskID = v4();
-    const task_finished_indicator = `task-finished-${taskID}`;
-
-    const taskListMap = getMapFromSubDoc(taskList);
-    const taskOutputsMap: Y.Map<Y.Doc> = getMapFromSubDoc(taskOutputs)
-
-
-    const taskVC = create_signed_task({
-        "task-id": taskID,
-        "action": "new-task",
-        "name": agent_name,
-        "location": zip,
-        source: "http",
-        "task_finished-indicator": task_finished_indicator
-    });
-    // taskListMap.set(taskID, { credential: taskVC });
-    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: taskVC }, taskList.guid, mapname)
-
-
-    try {
-        const wireSubscription = await subscribeToWire(taskID);
-        wireSubscription.onData((chunk: string, allChunks: any, error: any) => {
-            if (chunk.includes(task_finished_indicator)) {
-                logger.info("task finished indicator found in wire data");
-                callback(taskID, taskOutputsMap.get(taskID), taskListMap, taskOutputsMap, spareArgs);
-                const uninstall_task_vc = create_signed_task({ "task-id": taskID, "action": "uninstall-task", "name": "uninstall_task" });
-                // taskListMap.set(taskID, { credential: uninstall_task_vc });
-                writeFieldToSynapseSubdoc(voltClient, taskID, { credential: uninstall_task_vc }, taskList.guid, mapname)
-
-            } else if (chunk.includes("task-failed-" + taskID)) {
-                logger.info("task failed indicator found in wire data");
-                const uninstall_task_vc = create_signed_task({ "task-id": taskID, "action": "uninstall-task", "name": "uninstall_task" });
-                // taskListMap.set(taskID, { credential: uninstall_task_vc });
-                writeFieldToSynapseSubdoc(voltClient, taskID, { credential: uninstall_task_vc }, taskList.guid, mapname)
-
-            }
-        });
-    } catch (error) {
-        logger.error("error subscribing to wire: %o", error);
-    }
-
-    observeTaskOutputs(taskOutputs, taskID);
-    const run_task_vc = create_signed_task({
-        "task-id": taskID,
-        "action": "run-task",
-        "name": agent_name,
-        "cli_args": cli_args
-
-    });
-    // taskListMap.set(taskID, { credential: run_task_vc });
-    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: run_task_vc }, taskList.guid, mapname)
-
-}
 
 
 
-
-/**
- * Publishes a message to a specific inter-agent wire.
- * @param {string} wireId - The ID of the wire to publish to.
- * @param {string} message - The message to publish.
- * @returns {Promise<void>} Resolves when the message is successfully published.
- */
-export async function publishToInterAgentWire(wireId: string, message: string): Promise<void> {
-    // create a wire with the given alias
-    return new Promise((resolve, reject) => {
-        const sendableMessage = Buffer.from(message);
-
-        logger.info("publishing to wire: %s", wireId);
-        const pub = voltClient.PublishWire({
-            wire_id: wireId,
-            chunk: sendableMessage
-        });
-
-        let count = 0;
-        const timer = setInterval(() => {
-            // If running on node, you can receive raw Buffers.
-
-            if (count > 10) {
-                clearInterval(timer);
-                pub.end();
-            }
-            count++;
-        }, 1000);
-
-        pub.on("end", () => {
-            logger.info("publish ended");
-            resolve();
-        });
-
-        pub.on("error", (err: Error) => {
-            logger.error("publication error: [%s]", err.message);
-            reject(err);
-        });
-    });
-
-
-    // push the data to the wire, see publishToWire in index.js for example
-}
-
-/**
- * Generator function that can be used to subscribe to a wire and retrieve data in sequence using next() calls.
- * @param {*} wireAlias The alias of the wire to subscribe to.
- * @param {*} wireID The ID of the wire to subscribe to.
- * @returns {AsyncGenerator<string>} An async generator that yields data chunks as they arrive.
- */
-export async function* wireGenerator(wireAlias: string, wireID: string): AsyncGenerator<string> {
-    logger.info("subscribing to wire with alias:", wireAlias);
-    logger.info("wireID:", wireID);
-
-    // Start wire subscription immediately
-
-    // Create async iterable that handles both existing and new data
-    const createDataStream = async function* () {
-        const wire = await subscribeToWire(wireID);
-
-        // Handle new data using a promise-based approach
-        let streamEnded = false;
-        const dataQueue: string[] = [];
-
-        // Set up data handlers
-        const unsubscribeData = wire.onData((chunk: Buffer) => {
-            logger.info("New data chunk received:", chunk.toString('utf-8'));
-            dataQueue.push(chunk.toString('utf-8'));
-        });
-
-        const unsubscribeError = wire.onError((error: Error) => {
-            logger.warn("Wire error:", error);
-            streamEnded = true;
-        });
-
-
-
-        // Get existing transmissions
-        let existingTransmissions = [];
-        try {
-            existingTransmissions = await getExistingTransmissions(wireID, voltClient);
-        } catch (error) {
-            existingTransmissions = [{ "payload": "test value" }];
-            logger.warn("Error fetching existing transmissions:", error);
-        }
-        logger.info("Existing transmissions:", existingTransmissions.length);
-
-        // Yield existing transmissions first
-        for (const transmission of existingTransmissions) {
-            logger.info("Yielding existing transmission:", transmission);
-            yield transmission.payload.toString('utf-8');
-        }
-
-
-        try {
-            // Yield new data as it arrives
-            while (!streamEnded) {
-                if (dataQueue.length > 0) {
-                    const chunk = dataQueue.shift();
-                    logger.info("Yielding new chunk:", chunk);
-                    yield chunk;
-                } else {
-
-                    // Wait for new data
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                }
-            }
-            logger.info("Stream ended, no more data to yield.");
-        } finally {
-            logger.info("Stream ended, cleaning up...");
-            // Clean up subscriptions
-            if (unsubscribeData) unsubscribeData();
-            if (unsubscribeError) unsubscribeError();
-            wire.close();
-        }
-    };
-
-    // Delegate to the combined stream
-    yield* createDataStream();
-}
-
-async function getExistingTransmissions(alias: string, voltClient: VoltClient) {
-    const results = await voltClient.SqlExecuteJSON({
-        database_id: alias,
-        statement: "SELECT * FROM wire_data"
-    }).catch((error: Error) => {
-        logger.error("Error fetching existing transmissions:", error);
-    });
-
-    return results;
-}
 
 interface WireSubscription {
     onData: (callback: Function) => () => boolean;
@@ -309,6 +95,8 @@ interface WireSubscription {
     getAllData: () => Buffer[];
     close: () => void;
 }
+
+
 //TODO: continue to think about moving this to a generator
 /**
  * Subscribe to a wire and return an interface for handling incoming data
@@ -536,57 +324,56 @@ export function startTaskWithCliArgs(taskID: string, taskList: Y.Doc, cli_args: 
  * @returns {Promise<void>} - Resolves when the task is finished, rejects on error.
  */
 export async function waitForTaskFinished(taskID: string): Promise<void> {
-    const task_finished_indicator = `task-finished-${taskID}`;
-    logger.info("Waiting for task to finish with ID:", taskID);
-    let retries = 0;
-    const maxRetries = 100
+    const indicator = `task-finished-${taskID}`;
+    const watchStream = await voltClient.WatchSynapsePath({
+        start: {
+            synapse_id: SYNAPSE_ID,
+            document_id: `wire-${taskID}`,
+            path: [`$.${mapname}.messages`],
+        },
+    });
 
-    const trySubscribe = (): Promise<void> => {
-        return new Promise(async (resolve, reject) => {
-            try {
-                const wireSubscription = await subscribeToWire(taskID);
-                logger.info("Subscribed to wire for task ID:", taskID);
-                wireSubscription.onData((chunk: string, allChunks: string[], error: Error) => {
-                    logger.info("chunk received: %s", chunk);
-                    if (error) {
-                        logger.info("Error receiving task finished indicator: %o", error);
-                        wireSubscription.close();
-                        reject(error);
-                    }
-                    if (chunk.includes(task_finished_indicator)) {
-                        logger.info("task finished indicator found in wire data");
-                        resolve();
-                    }
-                    if (chunk.includes("task-failed-" + taskID)) {
-                        logger.info("task failed indicator found in wire data");
-                        reject(new Error("Task failed"));
-                    }
-                });
+    return new Promise<void>((resolve, reject) => {
+        let done = false;
 
-                wireSubscription.onError(async (error: Error) => {
-                    wireSubscription.close();
-                    if (retries < maxRetries) {
-                        retries++;
-                        logger.info(`Wire subscription failed, retrying (${retries}/${maxRetries})...`);
-                        await new Promise(r => setTimeout(r, 1000 * retries)); // Exponential backoff
-                        resolve(trySubscribe());
-                    } else {
-                        reject(error);
-                    }
-                });
-            } catch (error) {
-                if (retries < maxRetries) {
-                    retries++;
-                    await new Promise(r => setTimeout(r, 1000 * retries));
-                    resolve(trySubscribe());
-                } else {
-                    reject(error);
-                }
+        const cleanup = () => {
+            watchStream.off?.("data", onData);
+            watchStream.off?.("end", onEnd);
+            watchStream.off?.("error", onError);
+            watchStream.destroy?.();
+        };
+
+        const finish = (err?: unknown) => {
+            if (done) return;
+            done = true;
+            cleanup();
+            err ? reject(err) : resolve();
+        };
+
+        const onData = (msg: WireMessage) => {
+            logger.info(`the message is ${JSON.stringify(msg)}`);
+            if (msg.update) {
+                const msgValue = JSON.parse(msg.update.value).message;
+                if (msgValue.includes(indicator))
+                    finish();
             }
-        });
-    };
-    return trySubscribe();
+
+        };
+
+        const onEnd = () => finish(new Error(`Watch ended before ${indicator}`));
+        const onError = (err: unknown) => finish(err);
+
+
+        watchStream.on("data", onData);
+        watchStream.once("end", onEnd);
+        watchStream.once("error", onError);
+    });
 }
+
+type WireMessage = {
+    update: { value: string }, status: object
+}
+
 
 /**
  * Creates and adds a signed uninstall task to the task list.
@@ -607,17 +394,33 @@ export function uninstallTask(taskID: string, taskList: Y.Doc, execute_after_tim
  * Requests and retrieves metadata for a task.
  * @param {string} taskID - The unique ID for the task.
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
- * @returns {Promise<Object>} - Resolves with the metadata object for the task.
+ * @returns {Promise<TaskMetadata>} - Resolves with the metadata object for the task.
  */
-export function getTaskMetadata(taskID: string, taskList: Y.Doc): Promise<TaskMetadata> {
-    const taskVersionVC = create_signed_task({ "task-id": taskID, "action": "task-version" });
-    const metadataPromise = new Promise<TaskMetadata>((resolve, reject) => {
-        handleWireSubscription(resolve, reject, taskID);
-    });
-    // getMapFromSubDoc(taskList).set(v4(), { credential: taskVersionVC });
-    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVersionVC }, taskList.guid, mapname)
+export async function getTaskMetadata(taskID: string, rootDoc: Y.Doc): Promise<TaskMetadata> {
+    logger.info(`Getting metadata for taskID: ${taskID}`);
+    const ymap = rootDoc.getMap(mapname);
+    let generalMetadataDoc = ymap.get("task-metadatas") as Y.Doc;
+    if (!generalMetadataDoc) {
+        logger.info("No general metadata doc found, creating new one");
+        generalMetadataDoc = new Y.Doc({ guid: "general-metadata-doc" });
+        ymap.set("task-metadatas", generalMetadataDoc);
+    }
+    generalMetadataDoc.load();
+    await waitForDocSync(generalMetadataDoc);
+    const generalMetadataMap = generalMetadataDoc.getMap(mapname);
+    if (!generalMetadataMap.has(taskID)) {
+        logger.info(`No metadata doc found for taskID: ${taskID}, creating new one`);
+        const thisMetadataDoc = new Y.Doc({ guid: `metadata-${taskID}` });
+        generalMetadataMap.set(taskID, thisMetadataDoc);
+    }
+    const thisMetadataDoc = generalMetadataMap.get(taskID) as Y.Doc;
 
-    return metadataPromise;
+    thisMetadataDoc.load();
+    await waitForDocSync(thisMetadataDoc);
+
+    const finalMetadata = thisMetadataDoc.getMap(mapname).get("metadata") as TaskMetadata;
+    logger.info(`Metadata retrieved for taskID: ${taskID}, metadata: ${JSON.stringify(finalMetadata)}`);
+    return finalMetadata;
 
 }
 
@@ -627,24 +430,39 @@ export function getTaskMetadata(taskID: string, taskList: Y.Doc): Promise<TaskMe
  * @param {Y.Doc} taskList - The Ydoc containing the tasks ymap
  * @returns  - Resolves with the status object for the task.
  */
-export function getTaskStatus(taskID: string, taskList: Y.Doc) {
-    const taskStatusVC = create_signed_task({ "task-id": taskID, "action": "task-status" });
-    const taskStatusPromise = new Promise(async (resolve, reject) => {
-        try {
-            const wireSubscription = await subscribeToWire(taskID);
-            wireSubscription.onData(
-                handleWireStatus(resolve, reject, wireSubscription, taskID)
-            );
+export async function getTaskStatus(taskID: string, rootDoc: Y.Doc) {
+    // const request = {
+    //     start: {
+    //         synapse_id: SYNAPSE_ID,
+    //         document_id: `status-${taskID}`,
+    //         path: ["$.mapname.*"],
+    //     },
+    // };
+    // const watchStream = await voltClient.WatchSynapsePath(request);
+    // watchStream.on("data", (response: string) => {
+    //     console.log(response)
+    // });
 
-        } catch (error) {
-            logger.error("Error subscribing to wire: %o", error);
-            reject(error);
-        }
-    });
-    // getMapFromSubDoc(taskList).set(v4(), { credential: taskStatusVC });
-    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskStatusVC }, taskList.guid, mapname)
+    // watchStream.on("end", () => {
+    //     console.log("watch ended");
+    // });
 
-    return taskStatusPromise;
+    // watchStream.on("error", (err: any) => {
+    //     console.log(err);
+    // });
+    const ymap = rootDoc.getMap(mapname);
+    const thisStatusDoc = new Y.Doc({ guid: `status-${taskID}` });
+    let generalStatusDoc = ymap.get("task-statuses") as Y.Doc;
+    if (!generalStatusDoc) {
+        generalStatusDoc = new Y.Doc({ guid: "general-status-doc" });
+        ymap.set("wires", generalStatusDoc);
+    }
+    const generalStatusMap = generalStatusDoc.getMap(mapname);
+    generalStatusMap.set(taskID, thisStatusDoc);
+    thisStatusDoc.load();
+    await waitForDocSync(thisStatusDoc);
+    return thisStatusDoc.getMap(mapname).get("status");
+
 }
 
 
@@ -802,6 +620,7 @@ export async function* streamContinuousTaskOutput(rootDoc: Y.Doc, taskId: string
         if (!taskPump) {
             throw new Error("Failed to create task pump doc for taskId: " + taskId);
         }
+        taskPump.load();
         waitForDocSync(taskPump).then(() => {
             set_subdoc_schema(taskId, EXTERNAL_PUMP_TASK_SCHEMA);
         });
@@ -933,67 +752,6 @@ export async function getTaskOutputJson(ydoc: Y.Doc, taskId: string): Promise<st
     });
 }
 
-
-async function handleWireSubscription(resolve: { (value: TaskMetadata | PromiseLike<TaskMetadata>): void; (arg0: any): void; }, reject: { (reason?: any): void; (arg0: unknown): void; }, taskID: string) {
-    try {
-        const wireSubscription = await subscribeToWire(taskID);
-        wireSubscription.onData((chunk: string, allChunks: string[], error: Error) => {
-            if (error) {
-                logger.error("Error receiving task metadata: %o", error);
-                reject(error);
-                wireSubscription.close();
-                return;
-            }
-            if (chunk) {
-                logger.info("Received task metadata chunk: %s", chunk);
-                try {
-                    if (chunk === "task-finished-" + taskID) {
-                        logger.info("Task finished indicator overwrote metadata, ignoring chunk and getting next ");
-                        return;
-                    }
-                    const metadata = JSON.parse(chunk);
-                    resolve(metadata);
-                    wireSubscription.close();
-                } catch (parseError) {
-                    logger.error("Error parsing task metadata chunk: %o", parseError);
-                    reject(parseError);
-                    wireSubscription.close();
-                }
-            }
-        });
-    } catch (error) {
-        logger.error("Error subscribing to wire: %o", error);
-        reject(error);
-    }
-}
-
-function handleWireStatus(resolve: { (value: unknown): void; (arg0: any): void; }, reject: { (reason?: any): void; (arg0: unknown): void; }, wireSubscription: WireSubscription, taskID: string) {
-    return function (chunk: string, allChunks: string[], error: Error) {
-        if (error) {
-            logger.error("Error receiving task status: %o", error);
-            reject(error);
-            wireSubscription.close();
-            return;
-        }
-        if (chunk) {
-            logger.info("Received task status chunk: %s", chunk);
-            try {
-                if (chunk === "task-finished-" + taskID) {
-                    logger.info("Task status received, but task is finished, ignoring chunk");
-                    return;
-                }
-                const status = JSON.parse(chunk);
-                resolve(status);
-                wireSubscription.close();
-            } catch (parseError) {
-                logger.error("Error parsing task status chunk: %o", parseError);
-                logger.info("chunk: %s", chunk);
-                reject(parseError);
-                wireSubscription.close();
-            }
-        }
-    };
-}
 
 function mapToObject(map: any): any {
     if (Array.isArray(map)) {
