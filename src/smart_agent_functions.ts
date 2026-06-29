@@ -57,7 +57,7 @@ const logger = winston.createLogger({
 
 // Method 1: Change the logger level to disable info logs
 // This will only show warn and error logs
-logger.level = 'warn';
+logger.level = 'info';
 
 
 /**
@@ -135,7 +135,7 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
 
 
     try {
-        const wireSubscription = await subscribeToWire(taskID);
+        const wireSubscription = await subscribeToWire(`wireid-${taskID}`);
         wireSubscription.onData((chunk: string, allChunks: any, error: any) => {
             if (chunk.includes(task_finished_indicator)) {
                 logger.info("task finished indicator found in wire data");
@@ -185,7 +185,7 @@ export async function publishToInterAgentWire(wireId: string, message: string): 
 
         logger.info("publishing to wire: %s", wireId);
         const pub = voltClient.PublishWire({
-            wire_id: wireId,
+            wire_id: `@${wireId}`,
             chunk: sendableMessage
         });
 
@@ -326,7 +326,7 @@ export async function subscribeToWire(wireName: string): Promise<WireSubscriptio
         const callbacks: Set<Function> = new Set();
         const errorCallbacks: Set<Function> = new Set();
 
-        const canAccess = await voltClient.CanAccessResource({ resource_id: wireName, access: "read" }).catch((error: Error) => {
+        const canAccess = await voltClient.CanAccessResource({ resource_id: `@${wireName}`, access: "read" }).catch((error: Error) => {
             logger.error("Error checking access to wire resource: %o", error);
         });
         if (![1, 2, 6, 7, "POLICY_DECISION_PERMIT"].includes(canAccess.decision)) {
@@ -336,7 +336,7 @@ export async function subscribeToWire(wireName: string): Promise<WireSubscriptio
         else {
             console.log(`Access granted to wire resource ${wireName}. Decision: ${canAccess.decision}`);
         }
-        const wireStream = await voltClient.SubscribeWire({ wire_id: wireName });
+        const wireStream = await voltClient.SubscribeWire({ wire_id: `@${wireName}` });
         logger.info("wire subscribed for wireName: %s", wireName);
 
         wireStream.on("data", (data: SubscribeWireResponse) => {
@@ -544,7 +544,7 @@ export async function waitForTaskFinished(taskID: string): Promise<void> {
     const trySubscribe = (): Promise<void> => {
         return new Promise(async (resolve, reject) => {
             try {
-                const wireSubscription = await subscribeToWire(taskID);
+                const wireSubscription = await subscribeToWire(`wireid-${taskID}`);
                 logger.info("Subscribed to wire for task ID:", taskID);
                 wireSubscription.onData((chunk: string, allChunks: string[], error: Error) => {
                     logger.info("chunk received: %s", chunk);
@@ -631,7 +631,7 @@ export function getTaskStatus(taskID: string, taskList: Y.Doc) {
     const taskStatusVC = create_signed_task({ "task-id": taskID, "action": "task-status" });
     const taskStatusPromise = new Promise(async (resolve, reject) => {
         try {
-            const wireSubscription = await subscribeToWire(taskID);
+            const wireSubscription = await subscribeToWire(`wireid-${taskID}`);
             wireSubscription.onData(
                 handleWireStatus(resolve, reject, wireSubscription, taskID)
             );
@@ -673,7 +673,7 @@ export function create_signed_task(task: SignedTaskCredential["credentialSubject
 }
 
 export async function deleteWire(wire_id: string) {
-    const deleteResourceRequest = { resource_id: wire_id, recursive: true };
+    const deleteResourceRequest = { resource_id: `@${wire_id}`, recursive: true };
     return voltClient
         .DeleteResource(deleteResourceRequest)
         .then((response: { status: Status }) => {
@@ -741,7 +741,7 @@ export function observeTaskOutputs(taskOutputs: Y.Doc, taskID: string) {
                 taskOutputText.observe(async () => {
                     const lines = taskOutputText.toString().split('\n');
                     const currentLine = lines[lines.length - 2];
-                    logger.info("stdOut: %s", currentLine);
+                    logger.info(`stdOut: ${currentLine}`);
                 });
             }
         }
@@ -936,7 +936,7 @@ export async function getTaskOutputJson(ydoc: Y.Doc, taskId: string): Promise<st
 
 async function handleWireSubscription(resolve: { (value: TaskMetadata | PromiseLike<TaskMetadata>): void; (arg0: any): void; }, reject: { (reason?: any): void; (arg0: unknown): void; }, taskID: string) {
     try {
-        const wireSubscription = await subscribeToWire(taskID);
+        const wireSubscription = await subscribeToWire(`wireid-${taskID}`);
         wireSubscription.onData((chunk: string, allChunks: string[], error: Error) => {
             if (error) {
                 logger.error("Error receiving task metadata: %o", error);
@@ -1049,7 +1049,7 @@ export async function waitForTaskAssigned(taskId: string, taskListDoc: Y.Doc, ma
         await new Promise(resolve => setTimeout(resolve, 500));
         attempts++;
     }
-    if (attempts >= maxAttemptsAssignment) {
+    if (attempts <= maxAttemptsAssignment) {
         return taskEntry?.assigned;
     }
     throw new Error(`Task ${taskId} was not assigned after ${maxAttemptsAssignment} attempts, agent network is likely busy, perhaps with stale agents`);
