@@ -1028,30 +1028,97 @@ function getPrivateKey() {
 }
 
 
-export async function waitForTaskAssigned(taskId: string, taskListDoc: Y.Doc, maxAttemptsCreation = 5, maxAttemptsAssignment = 1000) {
-    taskListDoc.load();
-    const taskList: Y.Map<SignedTaskCredentialWrapper> = taskListDoc.getMap(mapname);
+const TASK_CREATION_POLL_INTERVAL_MS = 1000;
+const TASK_ASSIGNMENT_POLL_INTERVAL_MS = 500;
+
+function delay(milliseconds: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * The result of waiting for a task to be assigned.
+ *
+ * - `"assigned"` — the task was picked up by an agent; `assignment` holds the assignee.
+ * - `"task-not-created"` — the task never appeared in the task list within the allotted attempts.
+ * - `"assignment-timed-out"` — the task was created but no agent picked it up in time.
+ *
+ * Read `status` to determine which case occurred before using `assignment`.
+ */
+export type TaskAssignmentOutcome =
+    | { status: "assigned"; assignment: string }
+    | { status: "task-not-created"; taskId: string; attempts: number }
+    | { status: "assignment-timed-out"; taskId: string; attempts: number };
+
+async function waitForTaskEntryToExist(
+    taskList: Y.Map<SignedTaskCredentialWrapper>,
+    taskId: string,
+    maxAttempts: number
+): Promise<SignedTaskCredentialWrapper | undefined> {
     let attempts = 0;
     let taskEntry = taskList.get(taskId);
-    while (!taskEntry) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+    while (!taskEntry && attempts < maxAttempts) {
+        await delay(TASK_CREATION_POLL_INTERVAL_MS);
         taskEntry = taskList.get(taskId);
         attempts++;
-        if (attempts >= maxAttemptsCreation) {
-            throw new Error(`Task ${taskId} was not created after ${maxAttemptsCreation} attempts`);
-        }
     }
-    attempts = 0;
+    return taskEntry;
+}
 
-    while (!(taskEntry as SignedTaskCredentialWrapper).assigned && attempts < maxAttemptsAssignment) {
+const SCHEDULING_DOC_NAMES = ["nodeScheduling", "pythonScheduling"];
+
+/**
+ * The host recorded as owner of a task in the scheduling overlay, or null if unassigned or the
+ * overlay is not present. Assignment lives at `<taskId>:assigned`, no longer on the task entry.
+ */
+function readScheduledOwner(rootDoc: Y.Doc, taskId: string): string | null {
+    const rootMap: Y.Map<Y.Doc> = rootDoc.getMap(mapname);
+    for (const schedulingDocName of SCHEDULING_DOC_NAMES) {
+        const schedulingDoc = rootMap.get(schedulingDocName);
+        if (!schedulingDoc) continue;
+        schedulingDoc.load();
+        const owner = schedulingDoc.getMap(mapname).get(`${taskId}:assigned`);
+        if (typeof owner === "string" && owner.length > 0) return owner;
+    }
+    return null;
+}
+
+/** The owner of a task, from the scheduling overlay first and the task entry as a fallback. */
+function resolveTaskOwner(
+    taskEntry: SignedTaskCredentialWrapper | undefined,
+    rootDoc: Y.Doc | undefined,
+    taskId: string
+): string | null {
+    if (taskEntry?.assigned) return taskEntry.assigned;
+    if (rootDoc) return readScheduledOwner(rootDoc, taskId);
+    return null;
+}
+
+export async function waitForTaskAssigned(
+    taskId: string,
+    taskListDoc: Y.Doc,
+    maxAttemptsCreation = 5,
+    maxAttemptsAssignment = 1000,
+    rootDoc?: Y.Doc
+): Promise<TaskAssignmentOutcome> {
+    taskListDoc.load();
+    const taskList: Y.Map<SignedTaskCredentialWrapper> = taskListDoc.getMap(mapname);
+
+    let taskEntry = await waitForTaskEntryToExist(taskList, taskId, maxAttemptsCreation);
+    if (!taskEntry) {
+        return { status: "task-not-created", taskId, attempts: maxAttemptsCreation };
+    }
+
+    let attempts = 0;
+    while (!resolveTaskOwner(taskEntry, rootDoc, taskId) && attempts < maxAttemptsAssignment) {
+        await delay(TASK_ASSIGNMENT_POLL_INTERVAL_MS);
         taskListDoc.load();
         taskEntry = taskList.get(taskId);
-        await new Promise(resolve => setTimeout(resolve, 500));
         attempts++;
     }
-    if (attempts <= maxAttemptsAssignment) {
-        return taskEntry?.assigned;
-    }
-    throw new Error(`Task ${taskId} was not assigned after ${maxAttemptsAssignment} attempts, agent network is likely busy, perhaps with stale agents`);
 
-} 
+    const owner = resolveTaskOwner(taskEntry, rootDoc, taskId);
+    if (owner) {
+        return { status: "assigned", assignment: owner };
+    }
+    return { status: "assignment-timed-out", taskId, attempts };
+}
