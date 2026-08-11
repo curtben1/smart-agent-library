@@ -95,6 +95,7 @@ interface InstallAndLaunchParams {
     taskOutputs: Y.Doc;
     spareArgs: any;
     target_host?: string;
+    validate_target_host?: boolean;
     rootDoc?: Y.Doc;
 }
 
@@ -111,11 +112,12 @@ interface InstallAndLaunchParams {
  * @param {Object} params.spareArgs - Additional arguments to pass to the callback.
  * @param {string} [params.target_host] - host_id of the only host allowed to run this task. The
  * install is published with it, which routes the follow-up run and uninstall to the same host.
- * @param {Y.Doc} [params.rootDoc] - Supply with target_host to validate the target against the
- * `agentList` before publishing anything.
+ * @param {boolean} [params.validate_target_host] - Off by default. Set with rootDoc to check the
+ * target against the `agentList` before publishing anything.
+ * @param {Y.Doc} [params.rootDoc] - The synapse root document, only read when validating.
  * @returns {Promise<void>} Resolves when the task is installed and launched.
  */
-export async function install_and_launch({ agent_name, zip, callback, cli_args, taskList, taskOutputs, spareArgs, target_host, rootDoc }: InstallAndLaunchParams): Promise<void> {
+export async function install_and_launch({ agent_name, zip, callback, cli_args, taskList, taskOutputs, spareArgs, target_host, validate_target_host, rootDoc }: InstallAndLaunchParams): Promise<void> {
     if (!cli_args) {
         logger.info("no cli_args provided, setting to empty string");
         cli_args = "";
@@ -128,7 +130,7 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
     const taskOutputsMap: Y.Map<Y.Doc> = getMapFromSubDoc(taskOutputs)
 
 
-    const targetHostField = await buildTargetHostField(target_host, taskList, rootDoc);
+    const targetHostField = await buildTargetHostField({ target_host, validate_target_host, rootDoc }, taskList);
 
     const taskVC = create_signed_task({
         "task-id": taskID,
@@ -569,24 +571,48 @@ export async function assertTargetHostUsable(targetHost: string, taskListDoc: Y.
 }
 
 /**
+ * How a task names the host that must execute it.
+ *
+ * Publishing is set and forget by default: the credential is written with the target and nothing is
+ * checked, so a bad target is only visible as a task that never gets an owner. Set
+ * `validate_target_host` with a `rootDoc` to trade that for a pre-publish check.
+ */
+export interface TargetHostOptions {
+    /** `host_id` of the only host allowed to execute the task, as keyed in the `agentList`. */
+    target_host?: string;
+    /**
+     * Off by default. When set, the target is checked against the `agentList` before anything is
+     * published and {@link TargetHostUnavailableError} is thrown instead of queuing a task no host
+     * would run. Requires `rootDoc`, and makes the publish call worth awaiting.
+     */
+    validate_target_host?: boolean;
+    /** The synapse root document holding the `agentList`. Only read when validating. */
+    rootDoc?: Y.Doc;
+}
+
+/**
  * The `target_host` fragment to merge into a credentialSubject before signing, empty for untargeted
- * tasks. Validates the target when a root document is supplied and throws
- * {@link TargetHostUnavailableError} rather than queuing a task no host would run.
+ * tasks. Only reads the `agentList` when validation was asked for, in which case it throws
+ * {@link TargetHostUnavailableError} rather than letting a doomed task be published.
  */
 async function buildTargetHostField(
-    targetHost: string | undefined,
-    taskListDoc: Y.Doc,
-    rootDoc?: Y.Doc
+    targetHostOptions: TargetHostOptions,
+    taskListDoc: Y.Doc
 ): Promise<{ target_host?: string }> {
-    if (!targetHost) return {};
+    const { target_host, validate_target_host, rootDoc } = targetHostOptions;
+    if (!target_host) return {};
 
-    if (!rootDoc) {
-        logger.warn(`target_host ${targetHost} given without a rootDoc, so the target cannot be validated; an offline, unknown or wrong-runtime target leaves this task queued indefinitely`);
-        return { target_host: targetHost };
+    if (!validate_target_host) {
+        logger.info(`publishing task targeted at host ${target_host} without validation; set validate_target_host to check the target first`);
+        return { target_host };
     }
 
-    await assertTargetHostUsable(targetHost, taskListDoc, rootDoc);
-    return { target_host: targetHost };
+    if (!rootDoc) {
+        throw new Error(`validate_target_host was set for target ${target_host} but no rootDoc was supplied; the agentList lives on the synapse root document and cannot be read without it`);
+    }
+
+    await assertTargetHostUsable(target_host, taskListDoc, rootDoc);
+    return { target_host };
 }
 
 export interface InstallTaskInputArgs {
@@ -597,6 +623,7 @@ export interface InstallTaskInputArgs {
     taskList: Y.Doc;
     execute_after_timestamp_ms?: number;
     target_host?: string;
+    validate_target_host?: boolean;
     rootDoc?: Y.Doc;
 }
 
@@ -613,9 +640,10 @@ export function installTask(taskID: string, taskName: string, taskLocation: stri
  *
  * Setting `target_host` makes the named host the only one that will ever execute this task and every
  * later action for the same task-id; no other host takes it and there is no fallback if that host is
- * offline. Supply `rootDoc` to have the target checked against the `agentList` before publishing,
- * which throws {@link TargetHostUnavailableError} instead of queuing a task no host would run.
- * @param input_args - Object containing the install details plus optional target_host/rootDoc.
+ * offline. The target is published as given and nothing is checked unless `validate_target_host` is
+ * set with a `rootDoc`, which throws {@link TargetHostUnavailableError} instead of queuing a task no
+ * host would run.
+ * @param input_args - Object containing the install details plus optional target host options.
  */
 export function installTask(input_args: InstallTaskInputArgs): Promise<void>;
 export async function installTask(
@@ -637,7 +665,7 @@ export async function installTask(
         }
         : taskIDOrArgs;
 
-    const targetHostField = await buildTargetHostField(installArgs.target_host, installArgs.taskList, installArgs.rootDoc);
+    const targetHostField = await buildTargetHostField(installArgs, installArgs.taskList);
 
     const taskVC = create_signed_task({
         "task-id": installArgs.taskID,
@@ -654,7 +682,7 @@ export async function installTask(
 
 interface Synapse_Write_Object { synapse_id: string, document_id: string, path: string }
 
-interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, synapse_write_path?: Synapse_Write_Object, execute_after_timestamp_ms?: number, target_host?: string, rootDoc?: Y.Doc }
+interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, synapse_write_path?: Synapse_Write_Object, execute_after_timestamp_ms?: number, target_host?: string, validate_target_host?: boolean, rootDoc?: Y.Doc }
 
 /**
  * @deprecated
@@ -677,9 +705,9 @@ export function startTask(taskID: string, taskList: Y.Doc, cli_args: string): Pr
  *
  * `target_host` is only needed when the install of this task was not itself driven by that host; an
  * install published with a target already routes every later action for the same task-id to it, so
- * omitting the field is the recommended default. Supply `rootDoc` alongside it to have the target
- * validated against the `agentList` before publishing.
- * @param input_args - Object containing taskID, taskList, and optional std_in/cli_args/target_host.
+ * omitting the field is the recommended default. Set `validate_target_host` with a `rootDoc` to have
+ * the target checked against the `agentList` before publishing.
+ * @param input_args - Object containing taskID, taskList, and optional std_in/cli_args/target host options.
  */
 export function startTask(input_args: StartTaskInputArgs): Promise<void>;
 export async function startTask( //TODO: add in translation schemas somehow
@@ -702,13 +730,13 @@ export async function startTask( //TODO: add in translation schemas somehow
     }
 
     // Handle new object signature
-    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, synapse_write_path, execute_after_timestamp_ms, target_host, rootDoc } = taskIDOrArgs;
+    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, synapse_write_path, execute_after_timestamp_ms } = taskIDOrArgs;
     let taskVC2: SignedTaskCredential;
     if (outer_output_pump_location) {
         logger.warn("This form of custom location will be deprecated once the volt schema issues are resolved, synapse_write_path is preferred and will be the primary future method.")
 
     }
-    const targetHostField = await buildTargetHostField(target_host, tl, rootDoc);
+    const targetHostField = await buildTargetHostField(taskIDOrArgs, tl);
     const baseTask: SignedTaskCredential["credentialSubject"] = {
         "task-id": taskID,
         action: "run-task",
@@ -810,12 +838,12 @@ export async function waitForTaskFinished(taskID: string): Promise<void> {
  * Creates and adds a signed uninstall task to the task list.
  * @param {string} taskID - The unique ID for the task.
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
- * @param target_host - Only needed when the task's install was not driven by that host; a targeted
- * install already routes its uninstall to the same host, and other hosts ignore the entry either way.
- * @param rootDoc - Supply with target_host to validate the target against the `agentList` first.
+ * @param targetHostOptions - A `target_host` is only needed when the task's install was not driven by
+ * that host; a targeted install already routes its uninstall to the same host, and other hosts ignore
+ * the entry either way. Validation is off unless asked for.
  */
-export async function uninstallTask(taskID: string, taskList: Y.Doc, execute_after_timestamp_ms?: number, target_host?: string, rootDoc?: Y.Doc): Promise<void> {
-    const targetHostField = await buildTargetHostField(target_host, taskList, rootDoc);
+export async function uninstallTask(taskID: string, taskList: Y.Doc, execute_after_timestamp_ms?: number, targetHostOptions: TargetHostOptions = {}): Promise<void> {
+    const targetHostField = await buildTargetHostField(targetHostOptions, taskList);
     const taskVC3 = create_signed_task({ "task-id": taskID, "action": "uninstall-task", ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {}), ...targetHostField });
     // getMapFromSubDoc(taskList).set(v4(), { credential: taskVC3 });
     writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC3 }, taskList.guid, mapname)
@@ -829,12 +857,12 @@ export async function uninstallTask(taskID: string, taskList: Y.Doc, execute_aft
  * Requests and retrieves metadata for a task.
  * @param {string} taskID - The unique ID for the task.
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
- * @param target_host - Only needed when the task's install was not driven by that host.
- * @param rootDoc - Supply with target_host to validate the target against the `agentList` first.
+ * @param targetHostOptions - A `target_host` is only needed when the task's install was not driven by
+ * that host. Validation is off unless asked for.
  * @returns {Promise<Object>} - Resolves with the metadata object for the task.
  */
-export async function getTaskMetadata(taskID: string, taskList: Y.Doc, target_host?: string, rootDoc?: Y.Doc): Promise<TaskMetadata> {
-    const targetHostField = await buildTargetHostField(target_host, taskList, rootDoc);
+export async function getTaskMetadata(taskID: string, taskList: Y.Doc, targetHostOptions: TargetHostOptions = {}): Promise<TaskMetadata> {
+    const targetHostField = await buildTargetHostField(targetHostOptions, taskList);
     const taskVersionVC = create_signed_task({ "task-id": taskID, "action": "task-version", ...targetHostField });
     const metadataPromise = new Promise<TaskMetadata>((resolve, reject) => {
         handleWireSubscription(resolve, reject, taskID);
@@ -850,12 +878,12 @@ export async function getTaskMetadata(taskID: string, taskList: Y.Doc, target_ho
  * Requests and retrieves status for a task.
  * @param {string} taskID - The unique ID for the task.
  * @param {Y.Doc} taskList - The Ydoc containing the tasks ymap
- * @param target_host - Only needed when the task's install was not driven by that host.
- * @param rootDoc - Supply with target_host to validate the target against the `agentList` first.
+ * @param targetHostOptions - A `target_host` is only needed when the task's install was not driven by
+ * that host. Validation is off unless asked for.
  * @returns  - Resolves with the status object for the task.
  */
-export async function getTaskStatus(taskID: string, taskList: Y.Doc, target_host?: string, rootDoc?: Y.Doc) {
-    const targetHostField = await buildTargetHostField(target_host, taskList, rootDoc);
+export async function getTaskStatus(taskID: string, taskList: Y.Doc, targetHostOptions: TargetHostOptions = {}) {
+    const targetHostField = await buildTargetHostField(targetHostOptions, taskList);
     const taskStatusVC = create_signed_task({ "task-id": taskID, "action": "task-status", ...targetHostField });
     const taskStatusPromise = new Promise(async (resolve, reject) => {
         try {

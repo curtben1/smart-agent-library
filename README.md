@@ -27,37 +27,52 @@ The field is written into the `credentialSubject` before signing, so it is insid
 ### Publishing a targeted task
 
 ```ts
-import { installTask, startTask, waitForTaskAssigned } from "@nqminds/smart-agent-functions";
+import { installTask, startTask, waitForTaskAssigned, TargetHostUnavailableError } from "@nqminds/smart-agent-functions";
 
-await installTask({
+installTask({
     taskID,
     taskName: "my-agent",
     taskLocation: "https://example.com/task.zip",
     sourceType: "https",
     taskList: nodeTaskList,
-    target_host: "host-1a2b3c",
-    rootDoc
+    target_host: "host-1a2b3c"
 });
 
 // Follow-up actions omit target_host: the install recorded ownership against the task-id, which
 // routes every later action for that task to the same host.
-await startTask({ taskID, taskList: nodeTaskList, cli_args: "--once" });
+startTask({ taskID, taskList: nodeTaskList, cli_args: "--once" });
 ```
+
+Publishing is set and forget: nothing is read back and nothing is checked, so there is no need to
+await these calls unless you opt into validation below.
 
 `target_host` is accepted by `installTask`, `install_and_launch`, `startTask` (object form),
 `uninstallTask`, `getTaskStatus` and `getTaskMetadata`. Repeating it on a follow-up action is
 accepted and only necessary when the install itself was never driven by that host.
 
-### Validating the target
+### Validating the target (opt in)
 
 A host cannot report a bad target back, so a targeted task aimed at the wrong host sits in the list
-forever. Passing `rootDoc` alongside `target_host` validates the target against the `agentList`
-before anything is published, and throws `TargetHostUnavailableError` instead of queuing a task no
-host would run. Without `rootDoc` the task is published unvalidated and a warning is logged.
+forever. Setting `validate_target_host` with a `rootDoc` checks the target against the `agentList`
+before anything is published and throws `TargetHostUnavailableError` instead of queuing a task no
+host would run. It is off by default, and turning it on is what makes a publish call worth awaiting:
+
+```ts
+try {
+    await installTask({ ...installDetails, target_host: "host-1a2b3c", validate_target_host: true, rootDoc });
+} catch (error) {
+    if (error instanceof TargetHostUnavailableError) console.error(error.validation.status);
+}
+```
 
 The checks are that the `host_id` exists in the `agentList`, that its `lastSeen` heartbeat is within
 `TARGET_HOST_STALENESS_THRESHOLD_MS` (90s, the hosts' own staleness threshold), and that it reports
-the runtime of the task list being published to.
+the runtime of the task list being published to. `validate_target_host` without a `rootDoc` throws,
+since the `agentList` cannot be read without it.
+
+On `uninstallTask`, `getTaskStatus` and `getTaskMetadata` these are grouped into one trailing
+`TargetHostOptions` argument, e.g.
+`uninstallTask(taskID, nodeTaskList, undefined, { target_host, validate_target_host: true, rootDoc })`.
 
 To check a target without publishing, use `validateTargetHost`, which returns the reason rather than
 throwing:
@@ -95,4 +110,5 @@ means:
 | Task silently ignored by every host              | `target_host` added after signing, or signed with the wrong key                           |
 | Follow-up `run-task` never executes              | Its install was never driven by the target host, so publish the install first or target the follow-up explicitly |
 
-The first three are what the pre-publish validation exists to catch.
+The first row is what the opt-in validation exists to catch. Since the default publish path checks
+nothing, `waitForTaskAssigned` or `validateTargetHost` are how you tell these apart after the fact.
