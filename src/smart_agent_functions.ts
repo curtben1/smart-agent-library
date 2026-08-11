@@ -9,7 +9,7 @@ import { v4 as uuidv4, v4 } from "uuid";
 import { sign, verify } from "verifiable-credential-toolkit";
 import winston from 'winston';
 import { Sign } from "crypto";
-import { SignedTaskCredential, SignedTaskCredentialWrapper } from "./types/shared.types";
+import { AgentInfo, SignedTaskCredential, SignedTaskCredentialWrapper, TargetHostValidation } from "./types/shared.types";
 import { TaskMetadata } from "./types/config.types";
 import { PublishWireRequest, PublishWireResponse, Resource, SaveResourceRequest, Status, SubscribeWireResponse } from "./types/volt.types";
 import { cli } from "winston/lib/winston/config";
@@ -94,6 +94,8 @@ interface InstallAndLaunchParams {
     taskList: Y.Doc;
     taskOutputs: Y.Doc;
     spareArgs: any;
+    target_host?: string;
+    rootDoc?: Y.Doc;
 }
 
 /**
@@ -107,9 +109,13 @@ interface InstallAndLaunchParams {
  * @param {Y.Doc} params.taskList - Yjs Doc (subdoc) containing a YMap to store tasks and their credentials.
  * @param {Y.Map} params.taskOutputs - Yjs map to store outputs from tasks.
  * @param {Object} params.spareArgs - Additional arguments to pass to the callback.
+ * @param {string} [params.target_host] - host_id of the only host allowed to run this task. The
+ * install is published with it, which routes the follow-up run and uninstall to the same host.
+ * @param {Y.Doc} [params.rootDoc] - Supply with target_host to validate the target against the
+ * `agentList` before publishing anything.
  * @returns {Promise<void>} Resolves when the task is installed and launched.
  */
-export async function install_and_launch({ agent_name, zip, callback, cli_args, taskList, taskOutputs, spareArgs }: InstallAndLaunchParams): Promise<void> {
+export async function install_and_launch({ agent_name, zip, callback, cli_args, taskList, taskOutputs, spareArgs, target_host, rootDoc }: InstallAndLaunchParams): Promise<void> {
     if (!cli_args) {
         logger.info("no cli_args provided, setting to empty string");
         cli_args = "";
@@ -122,13 +128,16 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
     const taskOutputsMap: Y.Map<Y.Doc> = getMapFromSubDoc(taskOutputs)
 
 
+    const targetHostField = await buildTargetHostField(target_host, taskList, rootDoc);
+
     const taskVC = create_signed_task({
         "task-id": taskID,
         "action": "new-task",
         "name": agent_name,
         "location": zip,
         source: "http",
-        "task_finished-indicator": task_finished_indicator
+        "task_finished-indicator": task_finished_indicator,
+        ...targetHostField
     });
     // taskListMap.set(taskID, { credential: taskVC });
     writeFieldToSynapseSubdoc(voltClient, taskID, { credential: taskVC }, taskList.guid, mapname)
@@ -428,22 +437,224 @@ function getMapFromSubDoc<T = unknown>(subdoc: Y.Doc): Y.Map<T> {
 }
 
 /**
+ * How long a host's heartbeat may go unrefreshed before the hosts themselves consider it dead. A
+ * targeted task published at a host past this threshold is never executed and never reassigned.
+ */
+export const TARGET_HOST_STALENESS_THRESHOLD_MS = 90_000;
+
+const AGENT_LIST_DOC_NAME = "agentList";
+const AGENT_LIST_SYNC_TIMEOUT_MS = 5000;
+
+const RUNTIME_NAMES_BY_TASK_LIST_NAME: Record<string, string[]> = {
+    nodeTaskList: ["nodejs", "node", "javascript"],
+    pythonTaskList: ["python", "python3"]
+};
+
+/**
+ * Thrown instead of publishing when a `target_host` names a host that could not execute the task.
+ * A targeted task has no fallback host, so publishing to a bad target would queue it indefinitely.
+ * Read `validation` for the specific reason.
+ */
+export class TargetHostUnavailableError extends Error {
+    readonly validation: TargetHostValidation;
+
+    constructor(validation: TargetHostValidation) {
+        super(describeTargetHostValidation(validation));
+        this.name = "TargetHostUnavailableError";
+        this.validation = validation;
+    }
+}
+
+function describeTargetHostValidation(validation: TargetHostValidation): string {
+    switch (validation.status) {
+        case "usable":
+            return `target host ${validation.targetHost} is live and supports the task's runtime`;
+        case "agent-list-unavailable":
+            return `cannot verify target host ${validation.targetHost}: no ${AGENT_LIST_DOC_NAME} sub-document is present on the supplied root document`;
+        case "unknown-host":
+            return `target host ${validation.targetHost} is not in the ${AGENT_LIST_DOC_NAME}, so no host would ever execute this task`;
+        case "stale-host":
+            return `target host ${validation.targetHost} last checked in at ${validation.lastSeen ?? "an unreadable timestamp"}, ${validation.millisecondsSinceLastSeen ?? "an unknown number of"}ms ago, beyond the ${TARGET_HOST_STALENESS_THRESHOLD_MS}ms staleness threshold`;
+        case "runtime-unsupported":
+            return `target host ${validation.targetHost} reports runtimes [${validation.hostRuntimes.join(", ")}], none of which match [${validation.requiredRuntimes.join(", ")}] required by the task list being published to`;
+    }
+}
+
+async function waitForDocSyncOrTimeout(doc: Y.Doc, timeoutMilliseconds: number): Promise<void> {
+    await Promise.race([waitForDocSync(doc), delay(timeoutMilliseconds)]);
+}
+
+async function loadAgentListMap(rootDoc: Y.Doc): Promise<Y.Map<AgentInfo> | undefined> {
+    const rootMap: Y.Map<Y.Doc> = rootDoc.getMap(mapname);
+    const agentListDoc = rootMap.get(AGENT_LIST_DOC_NAME);
+    if (!agentListDoc) return undefined;
+
+    agentListDoc.load();
+    await waitForDocSyncOrTimeout(agentListDoc, AGENT_LIST_SYNC_TIMEOUT_MS);
+    return agentListDoc.getMap(mapname);
+}
+
+/** The runtimes a host must report to be a valid target for tasks on the given task list. */
+function requiredRuntimesForTaskList(rootDoc: Y.Doc, taskListDoc: Y.Doc): string[] {
+    const rootMap: Y.Map<Y.Doc> = rootDoc.getMap(mapname);
+    for (const [taskListName, runtimeNames] of Object.entries(RUNTIME_NAMES_BY_TASK_LIST_NAME)) {
+        if (rootMap.get(taskListName)?.guid === taskListDoc.guid) return runtimeNames;
+    }
+    return [];
+}
+
+function checkTargetHostHeartbeat(targetHost: string, hostEntry: AgentInfo): TargetHostValidation | null {
+    const millisecondsSinceLastSeen = hostEntry.lastSeen ? Date.now() - Date.parse(hostEntry.lastSeen) : NaN;
+    if (Number.isNaN(millisecondsSinceLastSeen)) {
+        return { status: "stale-host", targetHost, lastSeen: hostEntry.lastSeen };
+    }
+    if (millisecondsSinceLastSeen >= TARGET_HOST_STALENESS_THRESHOLD_MS) {
+        return { status: "stale-host", targetHost, lastSeen: hostEntry.lastSeen, millisecondsSinceLastSeen };
+    }
+    return null;
+}
+
+function checkTargetHostRuntimes(
+    targetHost: string,
+    hostEntry: AgentInfo,
+    taskListDoc: Y.Doc,
+    rootDoc: Y.Doc
+): TargetHostValidation {
+    const requiredRuntimes = requiredRuntimesForTaskList(rootDoc, taskListDoc);
+    if (requiredRuntimes.length === 0) {
+        logger.warn(`task list ${taskListDoc.guid} does not match a known runtime task list, skipping the runtime check for target host ${targetHost}`);
+        return { status: "usable", targetHost };
+    }
+
+    const hostRuntimes = hostEntry.runtimes ?? [];
+    const supportsRequiredRuntime = hostRuntimes.some(runtime => requiredRuntimes.includes(runtime.toLowerCase()));
+    if (!supportsRequiredRuntime) {
+        return { status: "runtime-unsupported", targetHost, requiredRuntimes, hostRuntimes };
+    }
+    return { status: "usable", targetHost };
+}
+
+/**
+ * Checks whether a host could actually execute a task published to the given task list: that the
+ * host_id is present in the `agentList`, that its heartbeat is inside the hosts' own staleness
+ * threshold, and that it reports the runtime of that task list. Returns the reason it is unusable
+ * rather than throwing.
+ * @param targetHost - The `host_id` under which the host appears in the `agentList`.
+ * @param taskListDoc - The runtime task list sub-document the task would be published to.
+ * @param rootDoc - The synapse root document holding the `agentList` sub-document.
+ */
+export async function validateTargetHost(targetHost: string, taskListDoc: Y.Doc, rootDoc: Y.Doc): Promise<TargetHostValidation> {
+    const agentList = await loadAgentListMap(rootDoc);
+    if (!agentList) return { status: "agent-list-unavailable", targetHost };
+
+    const hostEntry = agentList.get(targetHost);
+    if (!hostEntry) return { status: "unknown-host", targetHost };
+
+    const heartbeatFailure = checkTargetHostHeartbeat(targetHost, hostEntry);
+    if (heartbeatFailure) return heartbeatFailure;
+
+    return checkTargetHostRuntimes(targetHost, hostEntry, taskListDoc, rootDoc);
+}
+
+/**
+ * Throws {@link TargetHostUnavailableError} unless the named host could execute a task published to
+ * the given task list.
+ */
+export async function assertTargetHostUsable(targetHost: string, taskListDoc: Y.Doc, rootDoc: Y.Doc): Promise<void> {
+    const validation = await validateTargetHost(targetHost, taskListDoc, rootDoc);
+    if (validation.status !== "usable") {
+        throw new TargetHostUnavailableError(validation);
+    }
+    logger.info(`target host ${targetHost} validated for task list ${taskListDoc.guid}`);
+}
+
+/**
+ * The `target_host` fragment to merge into a credentialSubject before signing, empty for untargeted
+ * tasks. Validates the target when a root document is supplied and throws
+ * {@link TargetHostUnavailableError} rather than queuing a task no host would run.
+ */
+async function buildTargetHostField(
+    targetHost: string | undefined,
+    taskListDoc: Y.Doc,
+    rootDoc?: Y.Doc
+): Promise<{ target_host?: string }> {
+    if (!targetHost) return {};
+
+    if (!rootDoc) {
+        logger.warn(`target_host ${targetHost} given without a rootDoc, so the target cannot be validated; an offline, unknown or wrong-runtime target leaves this task queued indefinitely`);
+        return { target_host: targetHost };
+    }
+
+    await assertTargetHostUsable(targetHost, taskListDoc, rootDoc);
+    return { target_host: targetHost };
+}
+
+export interface InstallTaskInputArgs {
+    taskID: string;
+    taskName: string;
+    taskLocation: string;
+    sourceType: string;
+    taskList: Y.Doc;
+    execute_after_timestamp_ms?: number;
+    target_host?: string;
+    rootDoc?: Y.Doc;
+}
+
+/**
  * puts an install command onto the taskList.
  * @param {string} taskID - The unique ID for the task.
  * @param {string} taskName - The name of the task to be installed.
  * @param {string} taskLocation - The location of the task, typically a URL or martketplace uuid TODO: waiting on Toby file size limitation check
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
  */
-export function installTask(taskID: string, taskName: string, taskLocation: string, sourceType: string, taskList: Y.Doc, execute_after_timestamp_ms?: number) {
+export function installTask(taskID: string, taskName: string, taskLocation: string, sourceType: string, taskList: Y.Doc, execute_after_timestamp_ms?: number): Promise<void>;
+/**
+ * puts an install command onto the taskList, optionally pinning the task to a single host.
+ *
+ * Setting `target_host` makes the named host the only one that will ever execute this task and every
+ * later action for the same task-id; no other host takes it and there is no fallback if that host is
+ * offline. Supply `rootDoc` to have the target checked against the `agentList` before publishing,
+ * which throws {@link TargetHostUnavailableError} instead of queuing a task no host would run.
+ * @param input_args - Object containing the install details plus optional target_host/rootDoc.
+ */
+export function installTask(input_args: InstallTaskInputArgs): Promise<void>;
+export async function installTask(
+    taskIDOrArgs: string | InstallTaskInputArgs,
+    taskName?: string,
+    taskLocation?: string,
+    sourceType?: string,
+    taskList?: Y.Doc,
+    execute_after_timestamp_ms?: number
+): Promise<void> {
+    const installArgs: InstallTaskInputArgs = typeof taskIDOrArgs === "string"
+        ? {
+            taskID: taskIDOrArgs,
+            taskName: taskName!,
+            taskLocation: taskLocation!,
+            sourceType: sourceType!,
+            taskList: taskList!,
+            execute_after_timestamp_ms
+        }
+        : taskIDOrArgs;
 
-    const taskVC = create_signed_task({ "task-id": taskID, "action": "new-task", "name": taskName, "location": taskLocation, source: sourceType, ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {}) });
+    const targetHostField = await buildTargetHostField(installArgs.target_host, installArgs.taskList, installArgs.rootDoc);
+
+    const taskVC = create_signed_task({
+        "task-id": installArgs.taskID,
+        "action": "new-task",
+        "name": installArgs.taskName,
+        "location": installArgs.taskLocation,
+        source: installArgs.sourceType,
+        ...(installArgs.execute_after_timestamp_ms ? { execute_after_timestamp_ms: installArgs.execute_after_timestamp_ms } : {}),
+        ...targetHostField
+    });
     // getMapFromSubDoc(taskList).set(taskID, { credential: taskVC });
-    writeFieldToSynapseSubdoc(voltClient, taskID, { credential: taskVC }, taskList.guid, mapname);
+    writeFieldToSynapseSubdoc(voltClient, installArgs.taskID, { credential: taskVC }, installArgs.taskList.guid, mapname);
 }
 
 interface Synapse_Write_Object { synapse_id: string, document_id: string, path: string }
 
-interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, synapse_write_path?: Synapse_Write_Object, execute_after_timestamp_ms?: number }
+interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, synapse_write_path?: Synapse_Write_Object, execute_after_timestamp_ms?: number, target_host?: string, rootDoc?: Y.Doc }
 
 /**
  * @deprecated
@@ -451,7 +662,7 @@ interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object;
  * @param taskList - The Yjs map to store tasks and their credentials.
  * Creates and adds a signed start task to the task list.
  */
-export function startTask(taskID: string, taskList: Y.Doc): void;
+export function startTask(taskID: string, taskList: Y.Doc): Promise<void>;
 /**
  * @deprecated
  * Deprecated: Due to ambiguity, use startTaskWithCliArgs instead.
@@ -460,17 +671,22 @@ export function startTask(taskID: string, taskList: Y.Doc): void;
  * @param taskList - The Yjs map to store tasks and their credentials.
  * @param  cli_args - Command-line arguments to pass to the agent.
  */
-export function startTask(taskID: string, taskList: Y.Doc, cli_args: string): void;
+export function startTask(taskID: string, taskList: Y.Doc, cli_args: string): Promise<void>;
 /**
  * Creates and adds a signed start task to the task list.
- * @param input_args - Object containing taskID, taskList, and optional std_in/cli_args.
+ *
+ * `target_host` is only needed when the install of this task was not itself driven by that host; an
+ * install published with a target already routes every later action for the same task-id to it, so
+ * omitting the field is the recommended default. Supply `rootDoc` alongside it to have the target
+ * validated against the `agentList` before publishing.
+ * @param input_args - Object containing taskID, taskList, and optional std_in/cli_args/target_host.
  */
-export function startTask(input_args: StartTaskInputArgs): void;
-export function startTask( //TODO: add in translation schemas somehow
+export function startTask(input_args: StartTaskInputArgs): Promise<void>;
+export async function startTask( //TODO: add in translation schemas somehow
     taskIDOrArgs: string | StartTaskInputArgs,
     taskList?: Y.Doc,
     cli_args?: string
-): void {
+): Promise<void> {
     // Handle legacy signature
     if (typeof taskIDOrArgs === 'string') {
         const taskDetails: SignedTaskCredential["credentialSubject"] = { "task-id": taskIDOrArgs, "action": "run-task", "continuous": false };
@@ -486,19 +702,21 @@ export function startTask( //TODO: add in translation schemas somehow
     }
 
     // Handle new object signature
-    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, synapse_write_path, execute_after_timestamp_ms } = taskIDOrArgs;
+    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, synapse_write_path, execute_after_timestamp_ms, target_host, rootDoc } = taskIDOrArgs;
     let taskVC2: SignedTaskCredential;
     if (outer_output_pump_location) {
         logger.warn("This form of custom location will be deprecated once the volt schema issues are resolved, synapse_write_path is preferred and will be the primary future method.")
 
     }
+    const targetHostField = await buildTargetHostField(target_host, tl, rootDoc);
     const baseTask: SignedTaskCredential["credentialSubject"] = {
         "task-id": taskID,
         action: "run-task",
         ...(continuous !== undefined ? { continuous } : {}),
         ...(outer_output_pump_location ? { outer_output_pump_location } : {}),
         ...(synapse_write_path ? { synapse_write_path } : {}),
-        ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {})
+        ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {}),
+        ...targetHostField
     };
 
     if (ca && std_in) {
@@ -514,8 +732,8 @@ export function startTask( //TODO: add in translation schemas somehow
     writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC2 }, tl.guid, mapname)
 }
 
-export function startTaskWithStdin(taskID: string, taskList: Y.Doc, std_in: object) {
-    startTask({ taskID: taskID, taskList: taskList, std_in: std_in });
+export function startTaskWithStdin(taskID: string, taskList: Y.Doc, std_in: object): Promise<void> {
+    return startTask({ taskID: taskID, taskList: taskList, std_in: std_in });
 
 }
 /**
@@ -524,8 +742,8 @@ export function startTaskWithStdin(taskID: string, taskList: Y.Doc, std_in: obje
  * @param taskList - The Yjs map to store tasks and their credentials.
  * @param  cli_args - Command-line arguments to pass to the agent.
  */
-export function startTaskWithCliArgs(taskID: string, taskList: Y.Doc, cli_args: string) {
-    startTask({ taskID: taskID, taskList: taskList, cli_args: cli_args });
+export function startTaskWithCliArgs(taskID: string, taskList: Y.Doc, cli_args: string): Promise<void> {
+    return startTask({ taskID: taskID, taskList: taskList, cli_args: cli_args });
 }
 
 
@@ -592,9 +810,13 @@ export async function waitForTaskFinished(taskID: string): Promise<void> {
  * Creates and adds a signed uninstall task to the task list.
  * @param {string} taskID - The unique ID for the task.
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
+ * @param target_host - Only needed when the task's install was not driven by that host; a targeted
+ * install already routes its uninstall to the same host, and other hosts ignore the entry either way.
+ * @param rootDoc - Supply with target_host to validate the target against the `agentList` first.
  */
-export function uninstallTask(taskID: string, taskList: Y.Doc, execute_after_timestamp_ms?: number) {
-    const taskVC3 = create_signed_task({ "task-id": taskID, "action": "uninstall-task", ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {}) });
+export async function uninstallTask(taskID: string, taskList: Y.Doc, execute_after_timestamp_ms?: number, target_host?: string, rootDoc?: Y.Doc): Promise<void> {
+    const targetHostField = await buildTargetHostField(target_host, taskList, rootDoc);
+    const taskVC3 = create_signed_task({ "task-id": taskID, "action": "uninstall-task", ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {}), ...targetHostField });
     // getMapFromSubDoc(taskList).set(v4(), { credential: taskVC3 });
     writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC3 }, taskList.guid, mapname)
 
@@ -607,10 +829,13 @@ export function uninstallTask(taskID: string, taskList: Y.Doc, execute_after_tim
  * Requests and retrieves metadata for a task.
  * @param {string} taskID - The unique ID for the task.
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
+ * @param target_host - Only needed when the task's install was not driven by that host.
+ * @param rootDoc - Supply with target_host to validate the target against the `agentList` first.
  * @returns {Promise<Object>} - Resolves with the metadata object for the task.
  */
-export function getTaskMetadata(taskID: string, taskList: Y.Doc): Promise<TaskMetadata> {
-    const taskVersionVC = create_signed_task({ "task-id": taskID, "action": "task-version" });
+export async function getTaskMetadata(taskID: string, taskList: Y.Doc, target_host?: string, rootDoc?: Y.Doc): Promise<TaskMetadata> {
+    const targetHostField = await buildTargetHostField(target_host, taskList, rootDoc);
+    const taskVersionVC = create_signed_task({ "task-id": taskID, "action": "task-version", ...targetHostField });
     const metadataPromise = new Promise<TaskMetadata>((resolve, reject) => {
         handleWireSubscription(resolve, reject, taskID);
     });
@@ -625,10 +850,13 @@ export function getTaskMetadata(taskID: string, taskList: Y.Doc): Promise<TaskMe
  * Requests and retrieves status for a task.
  * @param {string} taskID - The unique ID for the task.
  * @param {Y.Doc} taskList - The Ydoc containing the tasks ymap
+ * @param target_host - Only needed when the task's install was not driven by that host.
+ * @param rootDoc - Supply with target_host to validate the target against the `agentList` first.
  * @returns  - Resolves with the status object for the task.
  */
-export function getTaskStatus(taskID: string, taskList: Y.Doc) {
-    const taskStatusVC = create_signed_task({ "task-id": taskID, "action": "task-status" });
+export async function getTaskStatus(taskID: string, taskList: Y.Doc, target_host?: string, rootDoc?: Y.Doc) {
+    const targetHostField = await buildTargetHostField(target_host, taskList, rootDoc);
+    const taskStatusVC = create_signed_task({ "task-id": taskID, "action": "task-status", ...targetHostField });
     const taskStatusPromise = new Promise(async (resolve, reject) => {
         try {
             const wireSubscription = await subscribeToWire(`wireid-${taskID}`);
@@ -1093,6 +1321,18 @@ function resolveTaskOwner(
     return null;
 }
 
+/**
+ * Waits for a task to appear in the task list and then for a host to own it, reporting which of the
+ * three outcomes occurred.
+ *
+ * Pass `rootDoc` whenever the hosts run with `USE_SCHEDULING_DOC=1`, which is required for
+ * `target_host`: ownership then lives at `<taskId>:assigned` in the runtime scheduling
+ * sub-document and the task entry's own `assigned` field stays null for every task.
+ *
+ * A targeted task is owned by its target almost immediately, with no claim round trip. If it stays
+ * unassigned, the target is offline, unknown, lacking the runtime, or at its concurrency limit — no
+ * other host will take over, so this resolves as `"assignment-timed-out"` rather than reassigning.
+ */
 export async function waitForTaskAssigned(
     taskId: string,
     taskListDoc: Y.Doc,

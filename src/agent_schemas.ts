@@ -172,6 +172,11 @@ const TASK_LIST_SCHEMA = JSON.stringify({
                 description:
                   "If set, the task will not be eligible for assignment until the specified Unix timestamp in milliseconds",
               },
+              target_host: {
+                type: "string",
+                description:
+                  "host_id of the only host allowed to execute this task. Skips the ranked claim/election: the named host takes the task on sight and every other host ignores the entry. There is no fallback if that host is offline, unknown or lacks the runtime",
+              },
             },
             required: ["task-id", "action"],
             additionalProperties: true,
