@@ -7,9 +7,10 @@ Utilities for managing distributed agent tasks using Yjs and Volt.
 ### From GitHub Release
 
 ```bash
-npm install https://github.com/your-org/smart-agent-lib/releases/download/v1.0.0/your-org-smart-agent-functions-1.0.0.tgz
+npm install https://github.com/curtben1/smart-agent-library/releases/download/<version>/nqminds-smart-agent-functions-<version>.tgz
 
 ```
+get this link by copying the download link for the desired release
 
 ## Host targeting (`target_host`)
 
