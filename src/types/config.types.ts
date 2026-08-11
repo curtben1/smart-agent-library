@@ -25,6 +25,7 @@ export interface TaskCredentialSubject {
   source?: "http" | "https" | "marketplace";
   cli_args?: string[];
   std_in?: object; // Maybe string and then loaded later
+  target_host?: string;
 }
 
 export interface TaskCredential {
