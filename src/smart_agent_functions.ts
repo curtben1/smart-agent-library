@@ -9,16 +9,34 @@ import { v4 as uuidv4, v4 } from "uuid";
 import { sign, verify } from "verifiable-credential-toolkit";
 import winston from 'winston';
 import { Sign } from "crypto";
-import { AgentInfo, SignedTaskCredential, SignedTaskCredentialWrapper, TargetHostValidation } from "./types/shared.types";
+import { AgentInfo, SignedTaskCredential, SignedTaskCredentialWrapper, SynapseWriteObject, TargetHostValidation } from "./types/shared.types";
 import { TaskMetadata } from "./types/config.types";
 import { PublishWireRequest, PublishWireResponse, Resource, SaveResourceRequest, Status, SubscribeWireResponse } from "./types/volt.types";
 import { cli } from "winston/lib/winston/config";
 import { writeFieldToSynapseSubdoc } from "./agent_schemas.js";
-import { EXTERNAL_PUMP_TASK_SCHEMA, SYNAPSE_ID } from "./agent_schemas.js";
+import {
+    EXTERNAL_PUMP_RESULT_ARRAY_SCHEMA,
+    EXTERNAL_PUMP_RESULT_TEXT_SCHEMA,
+    EXTERNAL_PUMP_TASK_SCHEMA,
+    SYNAPSE_ID
+} from "./agent_schemas.js";
 // @ts-ignore
 import { YArray } from "yjs/dist/src/internals";
 
 const mapname = "GENERIC_MAP_NAME";
+
+/** The root a continuous task's records are appended to in its default output pump document. */
+const RESULT_ARRAY_ROOT_NAME = "resultArray";
+
+/**
+ * The root a non-continuous task's final result is written to in its default output pump document,
+ * unless the task named another with `output_pump_root`. A document's unnamed root cannot be
+ * addressed on the synapse at all, so a result written there can be neither watched nor read by path.
+ */
+export const DEFAULT_RESULT_TEXT_ROOT_NAME = "resultText";
+
+/** The names an output pump result root may take: a name the synapse can address as `$.<name>`. */
+const ADDRESSABLE_ROOT_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 
 // Self-contained logger configuration
@@ -94,6 +112,7 @@ interface InstallAndLaunchParams {
     taskList: Y.Doc;
     taskOutputs: Y.Doc;
     spareArgs: any;
+    output_pump_root?: string;
     target_host?: string;
     validate_target_host?: boolean;
     rootDoc?: Y.Doc;
@@ -110,6 +129,8 @@ interface InstallAndLaunchParams {
  * @param {Y.Doc} params.taskList - Yjs Doc (subdoc) containing a YMap to store tasks and their credentials.
  * @param {Y.Map} params.taskOutputs - Yjs map to store outputs from tasks.
  * @param {Object} params.spareArgs - Additional arguments to pass to the callback.
+ * @param {string} [params.output_pump_root] - Renames the text root the task's final result lands on
+ * in its default output pump, which is `resultText` otherwise.
  * @param {string} [params.target_host] - host_id of the only host allowed to run this task. The
  * install is published with it, which routes the follow-up run and uninstall to the same host.
  * @param {boolean} [params.validate_target_host] - Off by default. Set with rootDoc to check the
@@ -117,7 +138,7 @@ interface InstallAndLaunchParams {
  * @param {Y.Doc} [params.rootDoc] - The synapse root document, only read when validating.
  * @returns {Promise<void>} Resolves when the task is installed and launched.
  */
-export async function install_and_launch({ agent_name, zip, callback, cli_args, taskList, taskOutputs, spareArgs, target_host, validate_target_host, rootDoc }: InstallAndLaunchParams): Promise<void> {
+export async function install_and_launch({ agent_name, zip, callback, cli_args, taskList, taskOutputs, spareArgs, output_pump_root, target_host, validate_target_host, rootDoc }: InstallAndLaunchParams): Promise<void> {
     if (!cli_args) {
         logger.info("no cli_args provided, setting to empty string");
         cli_args = "";
@@ -168,11 +189,13 @@ export async function install_and_launch({ agent_name, zip, callback, cli_args, 
     }
 
     observeTaskOutputs(taskOutputs, taskID);
+    warnIfOutputPumpRootIsUnusable(taskID, output_pump_root);
     const run_task_vc = create_signed_task({
         "task-id": taskID,
         "action": "run-task",
         "name": agent_name,
-        "cli_args": cli_args
+        "cli_args": cli_args,
+        ...(output_pump_root ? { output_pump_root } : {})
 
     });
     // taskListMap.set(taskID, { credential: run_task_vc });
@@ -680,9 +703,7 @@ export async function installTask(
     writeFieldToSynapseSubdoc(voltClient, installArgs.taskID, { credential: taskVC }, installArgs.taskList.guid, mapname);
 }
 
-interface Synapse_Write_Object { synapse_id: string, document_id: string, path: string }
-
-interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, synapse_write_path?: Synapse_Write_Object, execute_after_timestamp_ms?: number, target_host?: string, validate_target_host?: boolean, rootDoc?: Y.Doc }
+interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, output_pump_root?: string, synapse_write_path?: SynapseWriteObject, execute_after_timestamp_ms?: number, target_host?: string, validate_target_host?: boolean, rootDoc?: Y.Doc }
 
 /**
  * @deprecated
@@ -707,6 +728,16 @@ export function startTask(taskID: string, taskList: Y.Doc, cli_args: string): Pr
  * install published with a target already routes every later action for the same task-id to it, so
  * omitting the field is the recommended default. Set `validate_target_host` with a `rootDoc` to have
  * the target checked against the `agentList` before publishing.
+ *
+ * `output_pump_root` renames the text root a non-continuous task's final result lands on in its
+ * default output pump, which is `resultText` otherwise. It is only worth setting when a specific
+ * consumer expects a specific path, and that consumer has to be told the name.
+ *
+ * `synapse_write_path` asks the host to write a copy of the output to a document of your choosing.
+ * Its `additional_parse_options` make that write per record, so a continuous task builds a keyed
+ * collection under `path` instead of overwriting one key; readers of such a task have to watch
+ * `$.<root>.*` rather than a single key, and the destination document's roots must already be
+ * registered.
  * @param input_args - Object containing taskID, taskList, and optional std_in/cli_args/target host options.
  */
 export function startTask(input_args: StartTaskInputArgs): Promise<void>;
@@ -730,18 +761,20 @@ export async function startTask( //TODO: add in translation schemas somehow
     }
 
     // Handle new object signature
-    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, synapse_write_path, execute_after_timestamp_ms } = taskIDOrArgs;
+    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, output_pump_root, synapse_write_path, execute_after_timestamp_ms } = taskIDOrArgs;
     let taskVC2: SignedTaskCredential;
     if (outer_output_pump_location) {
         logger.warn("This form of custom location will be deprecated once the volt schema issues are resolved, synapse_write_path is preferred and will be the primary future method.")
 
     }
+    warnIfOutputPumpRootIsUnusable(taskID, output_pump_root);
     const targetHostField = await buildTargetHostField(taskIDOrArgs, tl);
     const baseTask: SignedTaskCredential["credentialSubject"] = {
         "task-id": taskID,
         action: "run-task",
         ...(continuous !== undefined ? { continuous } : {}),
         ...(outer_output_pump_location ? { outer_output_pump_location } : {}),
+        ...(output_pump_root ? { output_pump_root } : {}),
         ...(synapse_write_path ? { synapse_write_path } : {}),
         ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {}),
         ...targetHostField
@@ -758,6 +791,29 @@ export async function startTask( //TODO: add in translation schemas somehow
     }
 
     writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC2 }, tl.guid, mapname)
+}
+
+/**
+ * Warns when a requested output pump root is a name the host will refuse, which it does silently in
+ * favour of `resultText` — leaving a publisher that believed it had renamed the root reading an empty
+ * one. The name is published either way, since only the host decides where the result lands.
+ */
+function warnIfOutputPumpRootIsUnusable(taskID: string, output_pump_root?: string) {
+    if (!output_pump_root) return;
+
+    const isUsableRootName =
+        ADDRESSABLE_ROOT_NAME_PATTERN.test(output_pump_root) &&
+        output_pump_root !== RESULT_ARRAY_ROOT_NAME &&
+        output_pump_root !== mapname;
+    if (!isUsableRootName) {
+        logger.warn(
+            "task %s asks for output pump root %s, which the synapse cannot address as $.%s; the host will write to %s instead",
+            taskID,
+            output_pump_root,
+            output_pump_root,
+            DEFAULT_RESULT_TEXT_ROOT_NAME
+        );
+    }
 }
 
 export function startTaskWithStdin(taskID: string, taskList: Y.Doc, std_in: object): Promise<void> {
@@ -1004,29 +1060,45 @@ export function observeTaskOutputs(taskOutputs: Y.Doc, taskID: string) {
     });
 }
 
-async function set_subdoc_schema(subdoc_id: string, schema: string) {
-    try {
-        const mainSchemaResp = await voltClient.SetSynapseDocumentMetadata({
-            database_id: SYNAPSE_ID,
-            document_id: subdoc_id,
-            metadata: [{
-                name: mapname,
-                type: "map",
-                json_schema: schema,
-            }],
-        });
-        if (mainSchemaResp.status?.code) {
-            throw new Error(
-                `Failed to set main doc schema: ${mainSchemaResp.status.message}`,
-            );
-        } else {
-            logger.info(`Set schema for subdoc ${subdoc_id}: %s`, schema);
-        }
+interface SynapseDocumentRoot { name: string; type: "map" | "array" | "text"; jsonSchema: string }
 
+async function setSynapseDocumentRoots(documentId: string, roots: SynapseDocumentRoot[]) {
+    try {
+        const registration = await voltClient.SetSynapseDocumentMetadata({
+            database_id: SYNAPSE_ID,
+            document_id: documentId,
+            metadata: roots.map((root) => ({ name: root.name, type: root.type, json_schema: root.jsonSchema })),
+        });
+        if (registration.status?.code) {
+            throw new Error(
+                `Failed to register the roots of ${documentId}: ${registration.status.message}`,
+            );
+        }
+        logger.info(`Set roots for subdoc ${documentId}: %o`, roots.map((root) => `${root.name} (${root.type})`));
     } catch (err) {
-        console.error(`Error in set_subdoc_schema for ${subdoc_id}:`, err);
+        console.error(`Error in setSynapseDocumentRoots for ${documentId}:`, err);
         throw err;
     }
+}
+
+/** The synapse document id of a task's default output pump sub-document. */
+function externalPumpDocumentIdFor(taskId: string): string {
+    return `external-pump-${taskId}`;
+}
+
+/**
+ * Registers the roots an external pump document holds: the map root, the array a continuous task
+ * appends its records to, and the text root a one-shot task's final result is written to. Registering
+ * them is what lets a consumer watch the pump at `$.resultArray[*]` or at the result text root, which
+ * the synapse reports nothing for while unregistered. All three are named in the one call because
+ * registering replaces a document's metadata rather than adding to it.
+ */
+function registerExternalPumpDocumentRoots(externalPumpDocumentId: string, resultTextRootName: string) {
+    return setSynapseDocumentRoots(externalPumpDocumentId, [
+        { name: mapname, type: "map", jsonSchema: EXTERNAL_PUMP_TASK_SCHEMA },
+        { name: RESULT_ARRAY_ROOT_NAME, type: "array", jsonSchema: EXTERNAL_PUMP_RESULT_ARRAY_SCHEMA },
+        { name: resultTextRootName, type: "text", jsonSchema: EXTERNAL_PUMP_RESULT_TEXT_SCHEMA },
+    ]);
 }
 
 
@@ -1052,14 +1124,15 @@ export async function* streamContinuousTaskOutput(rootDoc: Y.Doc, taskId: string
     if (!externalPumpMap) {
         throw new Error("No external pump map found");
     }
+    const externalPumpDocumentId = externalPumpDocumentIdFor(taskId);
     if (!externalPumpMap.has(taskId)) {
-        externalPumpMap.set(taskId, new Y.Doc({ guid: taskId }));
+        externalPumpMap.set(taskId, new Y.Doc({ guid: externalPumpDocumentId }));
         const taskPump = externalPumpMap.get(taskId)
         if (!taskPump) {
             throw new Error("Failed to create task pump doc for taskId: " + taskId);
         }
         waitForDocSync(taskPump).then(() => {
-            set_subdoc_schema(taskId, EXTERNAL_PUMP_TASK_SCHEMA);
+            registerExternalPumpDocumentRoots(externalPumpDocumentId, DEFAULT_RESULT_TEXT_ROOT_NAME);
         });
     }
 
@@ -1069,7 +1142,7 @@ export async function* streamContinuousTaskOutput(rootDoc: Y.Doc, taskId: string
     }
     taskPumpDoc.load();
     await waitForDocSync(taskPumpDoc);
-    let taskPumpArray: YArray<object> = taskPumpDoc.getArray("resultArray");
+    let taskPumpArray: YArray<object> = taskPumpDoc.getArray(RESULT_ARRAY_ROOT_NAME);
     for (let i = 0; i < taskPumpArray.length; i++) {
         const value = taskPumpArray.get(i);
         if (value) {
@@ -1147,12 +1220,17 @@ export async function waitForDocSync(doc: Y.Doc) {
 }
 
 /**
- * Asynchronous function to retrieve task output JSON from a Y.Doc based on taskId.
- * @param {Y.Doc} ydoc 
- * @param {string} taskId 
- * @returns 
+ * Retrieves a one-shot task's final result text from its default output pump document, rejecting when
+ * the task has produced no output.
+ *
+ * The result is read from the pump's named text root — {@link DEFAULT_RESULT_TEXT_ROOT_NAME} unless
+ * the run named another with `output_pump_root`, in which case pass that same name here. A pump
+ * written by a host predating the named root is still read, from the document's unnamed text root.
+ * @param ydoc - The synapse root document.
+ * @param taskId - The unique ID of the task whose result is wanted.
+ * @param resultTextRootName - The pump text root to read, defaulting to `resultText`.
  */
-export async function getTaskOutputJson(ydoc: Y.Doc, taskId: string): Promise<string> {
+export async function getTaskOutputJson(ydoc: Y.Doc, taskId: string, resultTextRootName: string = DEFAULT_RESULT_TEXT_ROOT_NAME): Promise<string> {
 
     return new Promise(async (resolve, reject) => {
         const rootDocumentMap: Y.Map<Y.Doc> = ydoc.getMap(mapname);
@@ -1179,14 +1257,22 @@ export async function getTaskOutputJson(ydoc: Y.Doc, taskId: string): Promise<st
         taskPumpDoc.load();
         await waitForDocSync(taskPumpDoc);
 
-        let taskPumpText = taskPumpDoc.getText();
-        if (taskPumpText && taskPumpText.toString().length > 0) {
-            resolve(taskPumpText.toString());
+        const resultText = readPumpResultText(taskPumpDoc, resultTextRootName);
+        if (resultText.length > 0) {
+            resolve(resultText);
         } else {
             logger.error("No output found for taskId: %s", taskId);
             reject("No output found");
         }
     });
+}
+
+/**
+ * Returns a pump document's result text, taken from the named text root and falling back to the
+ * document's unnamed root, which is where a host predating the named root wrote it.
+ */
+function readPumpResultText(taskPumpDoc: Y.Doc, resultTextRootName: string): string {
+    return taskPumpDoc.getText(resultTextRootName).toString() || taskPumpDoc.getText().toString();
 }
 
 
