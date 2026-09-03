@@ -163,9 +163,38 @@ const TASK_LIST_SCHEMA = JSON.stringify({
                   synapse_id: { type: "string" },
                   document_id: { type: "string" },
                   path: { type: "string" },
+                  additional_parse_options: {
+                    type: "object",
+                    description:
+                      "JSONata expressions the host evaluates against the parsed output before the write, making the destination per record and optionally reshaping the written body",
+                    properties: {
+                      key_jsonata: {
+                        type: "string",
+                        description:
+                          "JSONata whose result is appended to path verbatim to form the path written, so it or path must supply the separator. Prefer the bracketed double-quoted form",
+                      },
+                      body_jsonata: {
+                        type: "string",
+                        description:
+                          "JSONata producing the JSON written in place of the raw output. Requires new_schema",
+                      },
+                      new_schema: {
+                        type: "object",
+                        description:
+                          "JSON Schema 2020-12 the body_jsonata result is validated against, describing the transform's shape rather than the agent's own output schema",
+                      },
+                    },
+                    required: ["key_jsonata"],
+                    additionalProperties: false,
+                  },
                 },
                 required: ["synapse_id", "document_id", "path"],
                 additionalProperties: false,
+              },
+              output_pump_root: {
+                type: "string",
+                description:
+                  "Name of the text root a non-continuous task's final output is written to in its default output pump document, watched at $.<name>. Defaults to resultText",
               },
               execute_after_timestamp_ms: {
                 type: "number",
@@ -227,7 +256,19 @@ const EXTERNAL_PUMP_TASK_SCHEMA = JSON.stringify({
   },
   additionalProperties: true,
   description:
-    "Per-task pump doc. Default Y.Text holds final output text. resultArray holds structured output objects.",
+    "Per-task pump doc. resultText holds a one-shot task's final output text. resultArray holds a continuous task's structured output objects.",
+});
+
+const EXTERNAL_PUMP_RESULT_ARRAY_SCHEMA = JSON.stringify({
+  type: "array",
+  description:
+    "Records a continuous task appends to its default output pump, watched at $.resultArray[*]",
+});
+
+const EXTERNAL_PUMP_RESULT_TEXT_SCHEMA = JSON.stringify({
+  type: "string",
+  description:
+    "The final output text a non-continuous task writes to its default output pump, watched at $.resultText",
 });
 
 const TASK_OUTPUTS_SCHEMA = JSON.stringify({
@@ -333,6 +374,8 @@ export {
   AGENT_LIST_SCHEMA,
   CARRIER_INSTANCE_SCHEMA,
   CARRIERS_SCHEMA,
+  EXTERNAL_PUMP_RESULT_ARRAY_SCHEMA,
+  EXTERNAL_PUMP_RESULT_TEXT_SCHEMA,
   EXTERNAL_PUMP_TASK_SCHEMA,
   EXTERNAL_PUMPS_SCHEMA,
   TASK_LIST_ROOT_SCHEMA,

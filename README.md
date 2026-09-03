@@ -113,3 +113,50 @@ means:
 
 The first row is what the opt-in validation exists to catch. Since the default publish path checks
 nothing, `waitForTaskAssigned` or `validateTargetHost` are how you tell these apart after the fact.
+
+## Reading a one-shot result (`resultText`)
+
+A non-continuous task's final result lands on the **named** `resultText` text root of its default
+output pump document, `external-pump-<task-id>` — not the document's unnamed root, which the synapse
+cannot address at all, and where hosts used to write it.
+
+`getTaskOutputJson` reads the named root, falling back to the unnamed one so a pump written by an
+older host still reads back:
+
+```ts
+const result = await getTaskOutputJson(rootDoc, taskID);
+```
+
+Because the root is named, the pump can also be watched over the synapse, which was impossible
+before:
+
+```jsonc
+{ "document_id": "external-pump-<task-id>", "path": ["$.resultText"] }
+```
+
+The watch is changes-only — attach it before the task finishes, or read the backlog from a synced
+replica. A continuous task is unchanged: its records go to `resultArray`, watched at
+`$.resultArray[*]`.
+
+`taskOutputs.<task-id>` streamed stdout is still the unnamed `Y.Text`, so it remains readable only
+through a CRDT replica and cannot be watched by path.
+
+### Naming the root (`output_pump_root`)
+
+`output_pump_root` renames that text root. `startTask` and `install_and_launch` accept it and merge it
+into the `credentialSubject` before signing:
+
+```ts
+await startTask({ taskID, taskList: nodeTaskList, output_pump_root: "probeResult" });
+
+const result = await getTaskOutputJson(rootDoc, taskID, "probeResult");
+```
+
+The name must match `[A-Za-z][A-Za-z0-9_-]*` and must not be `resultArray` or `GENERIC_MAP_NAME`,
+which the pump document already holds as other kinds of root. A host refuses anything else *silently*,
+in favour of `resultText`; publishing an unusable name logs a warning here so it does not surface as
+an empty read later.
+
+It is only worth setting when a specific consumer expects a specific path — the pump document is per
+task, so `resultText` never collides with anything, and every in-repo reader looks for it. A consumer
+of a renamed root has to be told the name, exactly as it would for a `synapse_write_path`.
