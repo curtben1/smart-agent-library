@@ -128,8 +128,10 @@ const TASK_LIST_SCHEMA = JSON.stringify({
                 description: "Source type (for new-task)",
               },
               std_in: {
-                type: "object",
-                description: "Structured stdin input (for run-task)",
+                type: ["object", "array"],
+                items: { type: "object" },
+                description:
+                    "Structured stdin input, or for a continuous-input task one Synapse address or a list of them (for run-task)",
                 additionalProperties: true,
               },
               cli_args: {
