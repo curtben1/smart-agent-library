@@ -37,7 +37,7 @@ export interface TaskEntry {
   assigned?: string;
 }
 
-export interface AgentInfo {
+export interface HostInfo {
   runtimes: string[];
   lastSeen: string;
   assignedTasks?: string[];

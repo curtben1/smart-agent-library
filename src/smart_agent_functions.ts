@@ -9,7 +9,7 @@ import { v4 as uuidv4, v4 } from "uuid";
 import { sign, verify } from "verifiable-credential-toolkit";
 import winston from 'winston';
 import { Sign } from "crypto";
-import { AgentInfo, SignedTaskCredential, SignedTaskCredentialWrapper, SynapseWriteObject, TargetHostValidation } from "./types/shared.types";
+import { HostInfo, SignedTaskCredential, SignedTaskCredentialWrapper, SynapseWriteObject, TargetHostValidation } from "./types/shared.types";
 import { TaskMetadata } from "./types/config.types";
 import { PublishWireRequest, PublishWireResponse, Resource, SaveResourceRequest, Status, SubscribeWireResponse } from "./types/volt.types";
 import { cli } from "winston/lib/winston/config";
@@ -140,7 +140,7 @@ interface InstallAndLaunchParams {
  * @param {string} [params.target_host] - host_id of the only host allowed to run this task. The
  * install is published with it, which routes the follow-up run and uninstall to the same host.
  * @param {boolean} [params.validate_target_host] - Off by default. Set with rootDoc to check the
- * target against the `agentList` before publishing anything.
+ * target against the `hostList` before publishing anything.
  * @param {Y.Doc} [params.rootDoc] - The synapse root document, only read when validating.
  * @returns {Promise<void>} Resolves when the task is installed and launched.
  */
@@ -449,8 +449,8 @@ export function initialiseSubDocs(agentStateMap: Y.Map<Y.Doc>) {
         agentStateMap.set("nodeTaskList", new Y.Doc());
     }
 
-    if (!agentStateMap.has("agentList")) {
-        agentStateMap.set("agentList", new Y.Doc());
+    if (!agentStateMap.has("hostList")) {
+        agentStateMap.set("hostList", new Y.Doc());
     }
 
     if (!agentStateMap.has("taskOutputs")) {
@@ -473,7 +473,7 @@ function getMapFromSubDoc<T = unknown>(subdoc: Y.Doc): Y.Map<T> {
  */
 export const TARGET_HOST_STALENESS_THRESHOLD_MS = 90_000;
 
-const AGENT_LIST_DOC_NAME = "agentList";
+const HOST_LIST_DOC_NAME = "hostList";
 const AGENT_LIST_SYNC_TIMEOUT_MS = 5000;
 
 const RUNTIME_NAMES_BY_TASK_LIST_NAME: Record<string, string[]> = {
@@ -500,10 +500,10 @@ function describeTargetHostValidation(validation: TargetHostValidation): string 
     switch (validation.status) {
         case "usable":
             return `target host ${validation.targetHost} is live and supports the task's runtime`;
-        case "agent-list-unavailable":
-            return `cannot verify target host ${validation.targetHost}: no ${AGENT_LIST_DOC_NAME} sub-document is present on the supplied root document`;
+        case "host-list-unavailable":
+            return `cannot verify target host ${validation.targetHost}: no ${HOST_LIST_DOC_NAME} sub-document is present on the supplied root document`;
         case "unknown-host":
-            return `target host ${validation.targetHost} is not in the ${AGENT_LIST_DOC_NAME}, so no host would ever execute this task`;
+            return `target host ${validation.targetHost} is not in the ${HOST_LIST_DOC_NAME}, so no host would ever execute this task`;
         case "stale-host":
             return `target host ${validation.targetHost} last checked in at ${validation.lastSeen ?? "an unreadable timestamp"}, ${validation.millisecondsSinceLastSeen ?? "an unknown number of"}ms ago, beyond the ${TARGET_HOST_STALENESS_THRESHOLD_MS}ms staleness threshold`;
         case "runtime-unsupported":
@@ -515,9 +515,9 @@ async function waitForDocSyncOrTimeout(doc: Y.Doc, timeoutMilliseconds: number):
     await Promise.race([waitForDocSync(doc), delay(timeoutMilliseconds)]);
 }
 
-async function loadAgentListMap(rootDoc: Y.Doc): Promise<Y.Map<AgentInfo> | undefined> {
+async function loadAgentListMap(rootDoc: Y.Doc): Promise<Y.Map<HostInfo> | undefined> {
     const rootMap: Y.Map<Y.Doc> = rootDoc.getMap(mapname);
-    const agentListDoc = rootMap.get(AGENT_LIST_DOC_NAME);
+    const agentListDoc = rootMap.get(HOST_LIST_DOC_NAME);
     if (!agentListDoc) return undefined;
 
     agentListDoc.load();
@@ -534,7 +534,7 @@ function requiredRuntimesForTaskList(rootDoc: Y.Doc, taskListDoc: Y.Doc): string
     return [];
 }
 
-function checkTargetHostHeartbeat(targetHost: string, hostEntry: AgentInfo): TargetHostValidation | null {
+function checkTargetHostHeartbeat(targetHost: string, hostEntry: HostInfo): TargetHostValidation | null {
     const millisecondsSinceLastSeen = hostEntry.lastSeen ? Date.now() - Date.parse(hostEntry.lastSeen) : NaN;
     if (Number.isNaN(millisecondsSinceLastSeen)) {
         return { status: "stale-host", targetHost, lastSeen: hostEntry.lastSeen };
@@ -547,7 +547,7 @@ function checkTargetHostHeartbeat(targetHost: string, hostEntry: AgentInfo): Tar
 
 function checkTargetHostRuntimes(
     targetHost: string,
-    hostEntry: AgentInfo,
+    hostEntry: HostInfo,
     taskListDoc: Y.Doc,
     rootDoc: Y.Doc
 ): TargetHostValidation {
@@ -567,16 +567,16 @@ function checkTargetHostRuntimes(
 
 /**
  * Checks whether a host could actually execute a task published to the given task list: that the
- * host_id is present in the `agentList`, that its heartbeat is inside the hosts' own staleness
+ * host_id is present in the `hostList`, that its heartbeat is inside the hosts' own staleness
  * threshold, and that it reports the runtime of that task list. Returns the reason it is unusable
  * rather than throwing.
- * @param targetHost - The `host_id` under which the host appears in the `agentList`.
+ * @param targetHost - The `host_id` under which the host appears in the `hostList`.
  * @param taskListDoc - The runtime task list sub-document the task would be published to.
- * @param rootDoc - The synapse root document holding the `agentList` sub-document.
+ * @param rootDoc - The synapse root document holding the `hostList` sub-document.
  */
 export async function validateTargetHost(targetHost: string, taskListDoc: Y.Doc, rootDoc: Y.Doc): Promise<TargetHostValidation> {
     const agentList = await loadAgentListMap(rootDoc);
-    if (!agentList) return { status: "agent-list-unavailable", targetHost };
+    if (!agentList) return { status: "host-list-unavailable", targetHost };
 
     const hostEntry = agentList.get(targetHost);
     if (!hostEntry) return { status: "unknown-host", targetHost };
@@ -607,21 +607,21 @@ export async function assertTargetHostUsable(targetHost: string, taskListDoc: Y.
  * `validate_target_host` with a `rootDoc` to trade that for a pre-publish check.
  */
 export interface TargetHostOptions {
-    /** `host_id` of the only host allowed to execute the task, as keyed in the `agentList`. */
+    /** `host_id` of the only host allowed to execute the task, as keyed in the `hostList`. */
     target_host?: string;
     /**
-     * Off by default. When set, the target is checked against the `agentList` before anything is
+     * Off by default. When set, the target is checked against the `hostList` before anything is
      * published and {@link TargetHostUnavailableError} is thrown instead of queuing a task no host
      * would run. Requires `rootDoc`, and makes the publish call worth awaiting.
      */
     validate_target_host?: boolean;
-    /** The synapse root document holding the `agentList`. Only read when validating. */
+    /** The synapse root document holding the `hostList`. Only read when validating. */
     rootDoc?: Y.Doc;
 }
 
 /**
  * The `target_host` fragment to merge into a credentialSubject before signing, empty for untargeted
- * tasks. Only reads the `agentList` when validation was asked for, in which case it throws
+ * tasks. Only reads the `hostList` when validation was asked for, in which case it throws
  * {@link TargetHostUnavailableError} rather than letting a doomed task be published.
  */
 async function buildTargetHostField(
@@ -733,7 +733,7 @@ export function startTask(taskID: string, taskList: Y.Doc, cli_args: string): Pr
  * `target_host` is only needed when the install of this task was not itself driven by that host; an
  * install published with a target already routes every later action for the same task-id to it, so
  * omitting the field is the recommended default. Set `validate_target_host` with a `rootDoc` to have
- * the target checked against the `agentList` before publishing.
+ * the target checked against the `hostList` before publishing.
  *
  * `output_pump_root` renames the text root a non-continuous task's final result lands on in its
  * default output pump, which is `resultText` otherwise. It is only worth setting when a specific

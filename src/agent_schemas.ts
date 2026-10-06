@@ -18,9 +18,9 @@ const TASK_LIST_ROOT_SCHEMA = JSON.stringify({
       type: "object",
       description: "Sub-document reference for Node.js runtime tasks",
     },
-    agentList: {
+    hostList: {
       type: "object",
-      description: "Sub-document reference for registered agent hosts",
+      description: "Sub-document reference for registered hosts",
     },
     externalPumps: {
       type: "object",
@@ -38,11 +38,11 @@ const TASK_LIST_ROOT_SCHEMA = JSON.stringify({
   additionalProperties: true,
 });
 
-const AGENT_LIST_SCHEMA = JSON.stringify({
+const HOST_LIST_SCHEMA = JSON.stringify({
   type: "object",
   additionalProperties: {
     type: "object",
-    description: "Agent host entry keyed by host_id (UUID)",
+    description: "Host entry keyed by host_id (UUID)",
     properties: {
       runtimes: {
         type: "array",
@@ -373,7 +373,7 @@ async function writeFieldToSynapseSubdoc(voltClient: VoltClient, field: string, 
 // === SETUP FUNCTION ===
 
 export {
-  AGENT_LIST_SCHEMA,
+  HOST_LIST_SCHEMA,
   CARRIER_INSTANCE_SCHEMA,
   CARRIERS_SCHEMA,
   EXTERNAL_PUMP_RESULT_ARRAY_SCHEMA,
