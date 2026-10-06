@@ -23,6 +23,12 @@ import {
 // @ts-ignore
 import { YArray } from "yjs/dist/src/internals";
 
+export * from "./types/flow.types.js";
+export { FLOW_EXPORT_SCHEMAS_BY_VERSION } from "./flow/flowSchema.js";
+export { FlowValidationError, validateSemanticFlow } from "./flow/flowValidation.js";
+export { deploySemanticFlow, planSemanticFlowDeployment } from "./flow/flowDeployment.js";
+export { watchForTaskListEntry, type PublishedTaskAction } from "./flow/taskListEntryWatching.js";
+
 const mapname = "GENERIC_MAP_NAME";
 
 /** The root a continuous task's records are appended to in its default output pump document. */
