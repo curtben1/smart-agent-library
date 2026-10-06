@@ -18,7 +18,7 @@ By default every live host that supports a task's runtime competes for it throug
 claim/election. Setting `target_host` on a task pins it to one named host: that host takes it on
 first sight with no ranking or claim round trip, and every other host ignores the entry.
 
-The value is a **`host_id`** — the key under which the host appears in the `agentList`
+The value is a **`host_id`** — the key under which the host appears in the `hostList`
 sub-document, the same string reported as a task's owner. It is not a hostname, DID or display name.
 Hosts must be running with `USE_SCHEDULING_DOC=1`; targeting is not supported on the legacy
 task-entry ownership path.
@@ -54,7 +54,7 @@ accepted and only necessary when the install itself was never driven by that hos
 ### Validating the target (opt in)
 
 A host cannot report a bad target back, so a targeted task aimed at the wrong host sits in the list
-forever. Setting `validate_target_host` with a `rootDoc` checks the target against the `agentList`
+forever. Setting `validate_target_host` with a `rootDoc` checks the target against the `hostList`
 before anything is published and throws `TargetHostUnavailableError` instead of queuing a task no
 host would run. It is off by default, and turning it on is what makes a publish call worth awaiting:
 
@@ -66,10 +66,10 @@ try {
 }
 ```
 
-The checks are that the `host_id` exists in the `agentList`, that its `lastSeen` heartbeat is within
+The checks are that the `host_id` exists in the `hostList`, that its `lastSeen` heartbeat is within
 `TARGET_HOST_STALENESS_THRESHOLD_MS` (90s, the hosts' own staleness threshold), and that it reports
 the runtime of the task list being published to. `validate_target_host` without a `rootDoc` throws,
-since the `agentList` cannot be read without it.
+since the `hostList` cannot be read without it.
 
 On `uninstallTask`, `getTaskStatus` and `getTaskMetadata` these are grouped into one trailing
 `TargetHostOptions` argument, e.g.
@@ -81,7 +81,7 @@ throwing:
 ```ts
 const validation = await validateTargetHost("host-1a2b3c", nodeTaskList, rootDoc);
 if (validation.status !== "usable") {
-    // "agent-list-unavailable" | "unknown-host" | "stale-host" | "runtime-unsupported"
+    // "host-list-unavailable" | "unknown-host" | "stale-host" | "runtime-unsupported"
     console.error(validation);
 }
 ```
