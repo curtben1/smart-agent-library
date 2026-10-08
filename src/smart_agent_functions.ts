@@ -897,6 +897,20 @@ export async function waitForTaskFinished(taskID: string): Promise<void> {
 }
 
 /**
+ * Creates and adds a signed stop task to the task list. The host that runs the task ends its process
+ * and keeps it installed, so a later run task starts it again.
+ * @param {string} taskID - The unique ID for the task.
+ * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.
+ * @param targetHostOptions - A `target_host` is only needed when the task's install was not driven by
+ * that host. Validation is off unless asked for.
+ */
+export async function stopTask(taskID: string, taskList: Y.Doc, execute_after_timestamp_ms?: number, targetHostOptions: TargetHostOptions = {}): Promise<void> {
+    const targetHostField = await buildTargetHostField(targetHostOptions, taskList);
+    const stopTaskVC = create_signed_task({ "task-id": taskID, "action": "stop-task", ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {}), ...targetHostField });
+    writeFieldToSynapseSubdoc(voltClient, v4(), { credential: stopTaskVC }, taskList.guid, mapname)
+}
+
+/**
  * Creates and adds a signed uninstall task to the task list.
  * @param {string} taskID - The unique ID for the task.
  * @param {Y.Doc} taskList - The Yjs map to store tasks and their credentials.

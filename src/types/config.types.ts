@@ -20,7 +20,7 @@ export interface TomlConfig {
 
 export interface TaskCredentialSubject {
   "task-id": string;
-  action: "new-task" | "run-task" | "uninstall-task" | "task-status" | "task-metadata";
+  action: "new-task" | "run-task" | "stop-task" | "uninstall-task" | "task-status" | "task-metadata";
   location?: string;
   source?: "http" | "https" | "marketplace";
   cli_args?: string[];
