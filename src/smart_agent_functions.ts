@@ -956,12 +956,12 @@ export async function getTaskMetadata(taskID: string, taskList: Y.Doc, targetHos
  * @param {Y.Doc} taskList - The Ydoc containing the tasks ymap
  * @param targetHostOptions - A `target_host` is only needed when the task's install was not driven by
  * that host. Validation is off unless asked for.
- * @returns  - Resolves with the status object for the task.
+ * @returns  - Resolves with the host's status string for the task, such as `processing` or `stopped`.
  */
-export async function getTaskStatus(taskID: string, taskList: Y.Doc, targetHostOptions: TargetHostOptions = {}) {
+export async function getTaskStatus(taskID: string, taskList: Y.Doc, targetHostOptions: TargetHostOptions = {}): Promise<string> {
     const targetHostField = await buildTargetHostField(targetHostOptions, taskList);
     const taskStatusVC = create_signed_task({ "task-id": taskID, "action": "task-status", ...targetHostField });
-    const taskStatusPromise = new Promise(async (resolve, reject) => {
+    const taskStatusPromise = new Promise<string>(async (resolve, reject) => {
         try {
             const wireSubscription = await subscribeToWire(`wireid-${taskID}`);
             wireSubscription.onData(
@@ -1307,13 +1307,14 @@ async function handleWireSubscription(resolve: { (value: TaskMetadata | PromiseL
                 return;
             }
             if (chunk) {
-                logger.info("Received task metadata chunk: %s", chunk);
+                const replyText = String(chunk);
+                logger.info("Received task metadata chunk: %s", replyText);
                 try {
-                    if (chunk === "task-finished-" + taskID) {
-                        logger.info("Task finished indicator overwrote metadata, ignoring chunk and getting next ");
+                    if (isLifecycleAnnouncement(replyText, taskID)) {
+                        logger.info("Lifecycle announcement %s arrived before the metadata, ignoring it", replyText);
                         return;
                     }
-                    const metadata = JSON.parse(chunk);
+                    const metadata = JSON.parse(replyText);
                     resolve(metadata);
                     wireSubscription.close();
                 } catch (parseError) {
@@ -1329,7 +1330,7 @@ async function handleWireSubscription(resolve: { (value: TaskMetadata | PromiseL
     }
 }
 
-function handleWireStatus(resolve: { (value: unknown): void; (arg0: any): void; }, reject: { (reason?: any): void; (arg0: unknown): void; }, wireSubscription: WireSubscription, taskID: string) {
+function handleWireStatus(resolve: (status: string) => void, reject: { (reason?: any): void; (arg0: unknown): void; }, wireSubscription: WireSubscription, taskID: string) {
     return function (chunk: string, allChunks: string[], error: Error) {
         if (error) {
             logger.error("Error receiving task status: %o", error);
@@ -1338,23 +1339,20 @@ function handleWireStatus(resolve: { (value: unknown): void; (arg0: any): void; 
             return;
         }
         if (chunk) {
-            logger.info("Received task status chunk: %s", chunk);
-            try {
-                if (chunk === "task-finished-" + taskID) {
-                    logger.info("Task status received, but task is finished, ignoring chunk");
-                    return;
-                }
-                const status = JSON.parse(chunk);
-                resolve(status);
-                wireSubscription.close();
-            } catch (parseError) {
-                logger.error("Error parsing task status chunk: %o", parseError);
-                logger.info("chunk: %s", chunk);
-                reject(parseError);
-                wireSubscription.close();
+            const replyText = String(chunk);
+            logger.info("Received task status chunk: %s", replyText);
+            if (isLifecycleAnnouncement(replyText, taskID)) {
+                logger.info("Lifecycle announcement %s arrived before the status, ignoring it", replyText);
+                return;
             }
+            resolve(replyText);
+            wireSubscription.close();
         }
     };
+}
+
+function isLifecycleAnnouncement(chunk: string, taskID: string): boolean {
+    return ["task-finished-", "task-stopped-", "task-failed-"].some(prefix => chunk === prefix + taskID);
 }
 
 function mapToObject(map: any): any {
