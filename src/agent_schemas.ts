@@ -107,6 +107,7 @@ const TASK_LIST_SCHEMA = JSON.stringify({
                 enum: [
                   "new-task",
                   "run-task",
+                  "stop-task",
                   "uninstall-task",
                   "task-status",
                   "task-metadata",

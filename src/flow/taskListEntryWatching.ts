@@ -3,7 +3,7 @@ import type { TaskListEntry } from "../types/flow.types.js";
 
 export interface PublishedTaskAction {
     taskId: string;
-    action: "new-task" | "run-task" | "uninstall-task";
+    action: "new-task" | "run-task" | "stop-task" | "uninstall-task";
 }
 
 /**

@@ -29,7 +29,7 @@ export interface SynapseWriteObject {
 export interface SignedTaskCredential extends VerifiableCredential {
     credentialSubject: {
         "task-id": string;
-        action: "new-task" | "run-task" | "task-version" | "uninstall-task" | "task-status";
+        action: "new-task" | "run-task" | "task-version" | "stop-task" | "uninstall-task" | "task-status";
         name?: string;
         location?: string;
         source?: string;
