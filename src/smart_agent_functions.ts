@@ -5,11 +5,11 @@ import grpc from "@grpc/grpc-js";
 // @ts-expect-error - Using JS module without types
 import { VoltClient } from "@tdxvolt/volt-client-grpc";
 import * as Y from "yjs";
-import { v4 as uuidv4, v4 } from "uuid";
-import { sign, verify } from "verifiable-credential-toolkit";
+import { v4 } from "uuid";
 import winston from 'winston';
 import { Sign } from "crypto";
-import { HostInfo, SignedTaskCredential, SignedTaskCredentialWrapper, SynapseWriteObject, TargetHostValidation } from "./types/shared.types";
+import { HostInfo, SignedTaskCredential, SignedTaskCredentialWrapper, SynapseWriteObject, TargetHostValidation, TrustGrantCredential, TrustGrantRequest } from "./types/shared.types";
+import { signCredentialAs, SigningIdentity, signingIdentityFromVoltConfig, trustGrantKeyOf } from "./taskSigning.js";
 import { TaskMetadata } from "./types/config.types";
 import { PublishWireRequest, PublishWireResponse, Resource, SaveResourceRequest, Status, SubscribeWireResponse } from "./types/volt.types";
 import { cli } from "winston/lib/winston/config";
@@ -28,6 +28,8 @@ export { FLOW_EXPORT_SCHEMAS_BY_VERSION } from "./flow/flowSchema.js";
 export { FlowValidationError, validateSemanticFlow } from "./flow/flowValidation.js";
 export { deploySemanticFlow, planSemanticFlowDeployment } from "./flow/flowDeployment.js";
 export { watchForTaskListEntry, type PublishedTaskAction } from "./flow/taskListEntryWatching.js";
+export type { TrustGrantCredential, TrustGrantRequest } from "./types/shared.types.js";
+export { readPublicSigningIdentity, trustGrantKeyOf, type PublicSigningIdentity } from "./taskSigning.js";
 
 const mapname = "GENERIC_MAP_NAME";
 
@@ -96,14 +98,17 @@ logger.level = 'info';
  */
 
 var voltClient: VoltClient;
+var signingIdentity: SigningIdentity | undefined;
 
 /**
- * Initialises the Volt client with the provided configuration.
+ * Initialises the Volt client with the provided configuration. Every task credential and trust grant
+ * that the library publishes afterwards is signed by the identity in that configuration.
  * @param {string} voltConfig The path to the Volt configuration file 
  * @returns {Promise<VoltClient>} Resolves with the initialised Volt client.
  */
 export async function getAndInitialiseVoltClient(voltConfig: string): Promise<VoltClient> {
     logger.info("initialising Volt client");
+    signingIdentity = signingIdentityFromVoltConfig(voltConfig);
     voltClient = new VoltClient(grpc);
     await voltClient.initialise(voltConfig);
     return voltClient;
@@ -980,28 +985,54 @@ export async function getTaskStatus(taskID: string, taskList: Y.Doc, targetHostO
 }
 
 
+/** Signs a task as the identity of the Volt configuration given to getAndInitialiseVoltClient. */
 export function create_signed_task(task: SignedTaskCredential["credentialSubject"]): SignedTaskCredential {
-
-    // turn the task into a vc and sign it
-    const validFrom = new Date().toISOString();
     logger.info("task: %o", task);
-    const unsigned_vc = {
-        "@context": [
-            "https://www.w3.org/ns/credentials/v2"
-            // Add other contexts if needed for your specific credentialSubject
-        ],
-        "id": `urn:uuid:${uuidv4()}`, // unique ID
-        "type": [
-            "VerifiableCredential", "taskCredential"
-        ],
-        "issuer": "did:example:issuerDid",
-        "validFrom": validFrom,
-        "credentialSubject": task
-    };
-    const private_key = getPrivateKey();
-    const vc = sign(unsigned_vc, private_key);
-    const vc_object: SignedTaskCredential = mapToObject(vc);
-    return vc_object;
+    return signCredentialAs<SignedTaskCredential>(requireSigningIdentity(), [TASK_CREDENTIAL_TYPE], task);
+}
+
+const TASK_CREDENTIAL_TYPE = "taskCredential";
+const TRUST_GRANT_CREDENTIAL_TYPE = "trustGrant";
+const TRUSTED_ISSUERS_DOC_GUID = "trusted-issuers";
+const ED25519_PUBLIC_KEY_LENGTH = 32;
+
+function requireSigningIdentity(): SigningIdentity {
+    if (!signingIdentity) throw new Error("call getAndInitialiseVoltClient before signing a credential");
+    return signingIdentity;
+}
+
+/**
+ * Signs a trust grant for an issuer and writes it to the trustedIssuers document. Hosts accept the
+ * grant only when this library's identity is their trust root. The document exists once a host has
+ * started against the synapse.
+ */
+export async function publishTrustGrant(request: TrustGrantRequest): Promise<TrustGrantCredential> {
+    if (Buffer.from(request.publicKey, "base64").length !== ED25519_PUBLIC_KEY_LENGTH) {
+        throw new Error(`the public key of ${request.issuerDid} must be a base64 ${ED25519_PUBLIC_KEY_LENGTH}-byte Ed25519 key`);
+    }
+    const grant = signCredentialAs<TrustGrantCredential>(
+        requireSigningIdentity(),
+        [TRUST_GRANT_CREDENTIAL_TYPE],
+        {
+            "issuer-did": request.issuerDid,
+            "public-key": request.publicKey,
+            ...(request.actions ? { actions: request.actions } : {})
+        },
+        request.validUntil ? { validUntil: request.validUntil } : {}
+    );
+    await writeFieldToSynapseSubdoc(voltClient, trustGrantKeyOf(request.issuerDid), grant, TRUSTED_ISSUERS_DOC_GUID, mapname);
+    return grant;
+}
+
+/** Replaces the trust grant for an issuer with null, so hosts stop accepting its new tasks. */
+export async function revokeTrustGrant(issuerDid: string): Promise<void> {
+    await writeFieldToSynapseSubdoc(voltClient, trustGrantKeyOf(issuerDid), null, TRUSTED_ISSUERS_DOC_GUID, mapname);
+}
+
+/** The trust grants that a synced trustedIssuers document holds, without revoked entries. */
+export function listTrustGrants(trustedIssuersDocument: Y.Doc): TrustGrantCredential[] {
+    const grants = Array.from(trustedIssuersDocument.getMap<TrustGrantCredential | null>(mapname).values());
+    return grants.filter((grant): grant is TrustGrantCredential => grant !== null);
 }
 
 export async function deleteWire(wire_id: string) {
@@ -1354,39 +1385,6 @@ function handleWireStatus(resolve: (status: string) => void, reject: { (reason?:
 function isLifecycleAnnouncement(chunk: string, taskID: string): boolean {
     return ["task-finished-", "task-stopped-", "task-failed-"].some(prefix => chunk === prefix + taskID);
 }
-
-function mapToObject(map: any): any {
-    if (Array.isArray(map)) {
-        logger.info("map is an array", map);
-        return map;
-    }
-
-    if (!(map instanceof Map) && typeof map !== 'object') {
-        return map;
-    }
-
-    const obj: Record<any, any> = {};
-    const entries = map instanceof Map ? map.entries() : Object.entries(map);
-
-    for (const [key, value] of entries) {
-        obj[key] = mapToObject(value);
-    }
-
-    return obj;
-}
-
-
-
-function getPrivateKey() {
-    // should read from a file and parse it but for testing purposes
-    return new Uint8Array([
-        249, 36, 149, 249, 249, 117, 133, 209,
-        234, 131, 132, 144, 15, 129, 114, 114,
-        244, 234, 241, 239, 198, 73, 72, 185,
-        156, 200, 237, 170, 2, 142, 41, 36
-    ]);
-}
-
 
 const TASK_CREATION_POLL_INTERVAL_MS = 1000;
 const TASK_ASSIGNMENT_POLL_INTERVAL_MS = 500;

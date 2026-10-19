@@ -26,6 +26,21 @@ export interface SynapseWriteObject {
     additional_parse_options?: SynapseWriteAdditionalParseOptions;
 }
 
+export interface TrustGrantCredential extends VerifiableCredential {
+    credentialSubject: {
+        "issuer-did": string;
+        "public-key": string;
+        actions?: string[];
+    };
+}
+
+export interface TrustGrantRequest {
+    issuerDid: string;
+    publicKey: string;
+    actions?: string[];
+    validUntil?: string;
+}
+
 export interface SignedTaskCredential extends VerifiableCredential {
     credentialSubject: {
         "task-id": string;

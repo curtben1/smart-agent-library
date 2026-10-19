@@ -342,7 +342,7 @@ const CARRIER_INSTANCE_SCHEMA = JSON.stringify({
 // }
 
 
-async function writeFieldToSynapseSubdoc(voltClient: VoltClient, field: string, value: object, documentId: string, pathPrefix: string) {
+async function writeFieldToSynapseSubdoc(voltClient: VoltClient, field: string, value: object | null, documentId: string, pathPrefix: string) {
   const jsonPath = `$.${pathPrefix}.${field}`;
 
   try {
