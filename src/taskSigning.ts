@@ -1,12 +1,12 @@
 import { createHash, createPrivateKey, createPublicKey, KeyObject } from "crypto";
 import { readFileSync } from "fs";
 import { v4 as uuidv4 } from "uuid";
-import { sign } from "verifiable-credential-toolkit";
+import { sign, type SigningKey } from "verifiable-credential-toolkit";
 
 export interface SigningIdentity {
     did: string;
     publicKey: string;
-    privateKeySeed: Uint8Array;
+    privateKeySeed: SigningKey;
 }
 
 export interface PublicSigningIdentity {
@@ -38,7 +38,7 @@ export function signingIdentityFromVoltConfig(voltConfigPath: string): SigningId
     return {
         did,
         publicKey: encodedRawPublicKeyOf(createPublicKey(privateKey)),
-        privateKeySeed: new Uint8Array(Buffer.from(privateKey.export({ format: "jwk" }).d as string, "base64url"))
+        privateKeySeed: new Uint8Array(Buffer.from(privateKey.export({ format: "jwk" }).d as string, "base64url")) as SigningKey
     };
 }
 
