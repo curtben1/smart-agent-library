@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/ben-curtis/Documents/repos/agent_prototype/afw_client_commands/src/**)",
+      "Bash(cd /home/ben-curtis/Documents/repos/agent_prototype; grep -rn \"describeFlow\\\\|ConnectedSynapse\" --include=*.ts . | grep -v node_modules | grep -v /dist/)",
+      "Read(//home/ben-curtis/Documents/repos/agent_prototype/**)",
+      "Read(//home/ben-curtis/Documents/repos/agent_prototype/afw_client_commands/**)",
+      "Bash(grep -v \"WriteSynapsePath\\\\|^\\\\s*$\")",
+      "Bash(npm run *)",
+      "Bash(cd /home/ben-curtis/Documents/repos/agent_prototype/agent_host/checks; grep -n \"afw_client_commands\\\\|flowParser\\\\|flowSchema\\\\|libraryDirectory\\\\|clientDirectory\" checkWritePathSchemaAgreement.ts)",
+      "Read(//home/ben-curtis/Documents/repos/agent_prototype/agent_host/checks/**)",
+      "Read(//home/ben-curtis/Documents/repos/agent_prototype/agent_host/**)",
+      "Bash(echo \"exit=$?\")"
+    ],
+    "additionalDirectories": [
+      "/home/ben-curtis/Documents/repos/agent_prototype/afw_client_commands/src",
+      "/home/ben-curtis/Documents/repos/agent_prototype/afw_client_commands/test"
+    ]
+  }
+}

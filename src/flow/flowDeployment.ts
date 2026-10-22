@@ -17,8 +17,10 @@ import type {
     SemanticFlowExport,
     SynapseDocumentRoot
 } from "../types/flow.types.js";
+import { waitWithDeadline } from "../delivery/deadline.js";
+import type { PublishedTaskEntry } from "../delivery/taskDelivery.js";
 import { taskCredentialPublishers } from "./taskCredentialPublishers.js";
-import { watchForTaskListEntry, type PublishedTaskAction } from "./taskListEntryWatching.js";
+import { watchForTaskListEntry, type ObservedTaskListEntry, type PublishedTaskAction } from "./taskListEntryWatching.js";
 
 const DEFAULT_PUBLISH_TIMEOUT_SECONDS = 60;
 const DEFAULT_INSTALL_SOURCE = "http";
@@ -66,6 +68,7 @@ export async function deploySemanticFlow(
 ): Promise<FlowDeploymentResult> {
     const reportProgress = options.onProgress ?? (() => undefined);
     const createdDocumentIds: string[] = [];
+    const publishedEntries: PublishedTaskEntry[] = [];
 
     for (const flowDocument of documentsToCreate(flow, options)) {
         await createFlowDocument(connection, flowDocument, options);
@@ -73,15 +76,15 @@ export async function deploySemanticFlow(
         reportProgress(documentCreatedEvent(flowDocument));
     }
     for (const agent of flow.agents) {
-        await installAgent(connection, agent, options);
+        publishedEntries.push(await installAgent(connection, agent, options));
         reportProgress(agentEvent("agentInstalled", agent));
     }
     for (const agent of flow.agents) {
-        await startAgent(connection, agent, options);
+        publishedEntries.push(await startAgent(connection, agent, options));
         reportProgress(agentEvent("agentStarted", agent));
     }
 
-    return { agents: flow.agents.map(deployedAgent), createdDocumentIds };
+    return { agents: flow.agents.map(deployedAgent), createdDocumentIds, publishedEntries };
 }
 
 function documentsToCreate(flow: SemanticFlowExport, options: FlowDeploymentOptions): FlowDocument[] {
@@ -132,10 +135,10 @@ async function installAgent(
     connection: FlowDeploymentConnection,
     agent: Agent,
     options: FlowDeploymentOptions
-): Promise<void> {
-    await describeFailureAs(`could not install ${agent.name} as task ${agent.id} on the ${agent.runtime} task list`, () => {
+): Promise<PublishedTaskEntry> {
+    return describeFailureAs(`could not install ${agent.name} as task ${agent.id} on the ${agent.runtime} task list`, () => {
         const taskList = connection.taskListFor(agent.runtime);
-        return publishAndAwaitEntry(taskList, { taskId: agent.id, action: "new-task" }, options, () =>
+        return publishAndAwaitEntry(taskList, agent, "new-task", options, () =>
             taskCredentialPublishers.installTask({
                 taskID: agent.id,
                 taskName: agent.name,
@@ -152,10 +155,10 @@ async function startAgent(
     connection: FlowDeploymentConnection,
     agent: Agent,
     options: FlowDeploymentOptions
-): Promise<void> {
-    await describeFailureAs(`could not start ${agent.name} as task ${agent.id} on the ${agent.runtime} task list`, () => {
+): Promise<PublishedTaskEntry> {
+    return describeFailureAs(`could not start ${agent.name} as task ${agent.id} on the ${agent.runtime} task list`, () => {
         const taskList = connection.taskListFor(agent.runtime);
-        return publishAndAwaitEntry(taskList, { taskId: agent.id, action: "run-task" }, options, () =>
+        return publishAndAwaitEntry(taskList, agent, "run-task", options, () =>
             taskCredentialPublishers.startTask({
                 taskID: agent.id,
                 taskList: taskList.document,
@@ -170,47 +173,29 @@ async function startAgent(
 }
 
 /**
- * Publishes, and resolves only once the entry for the given action is on the task list. The publish
- * functions return before the volt holds the write, so a caller that stops at the publish can lose it.
+ * Publishes, and resolves with the published entry once it is on the task list. The publish functions
+ * return before the volt holds the write, so a caller that stops at the publish can lose it.
  */
 async function publishAndAwaitEntry(
     taskList: FlowTaskList,
-    publishedAction: PublishedTaskAction,
+    agent: Agent,
+    action: PublishedTaskAction["action"],
     options: FlowDeploymentOptions,
     publish: () => Promise<void>
-): Promise<void> {
-    const entryHasAppeared = watchForTaskListEntry(taskList.entries, publishedAction);
+): Promise<PublishedTaskEntry> {
+    const entryHasAppeared = watchForTaskListEntry(taskList.entries, { taskId: agent.id, action });
     await publish();
-    await rejectAfterDeadline(
+    const observedEntry: ObservedTaskListEntry = await waitWithDeadline(
         entryHasAppeared,
         options.publishTimeoutSeconds ?? DEFAULT_PUBLISH_TIMEOUT_SECONDS,
-        `the ${publishedAction.action} entry to reach the task list`
+        `the ${action} entry to reach the task list`
     );
+    return { ...observedEntry, taskId: agent.id, action, runtime: agent.runtime };
 }
 
-async function rejectAfterDeadline(
-    pendingWork: Promise<void>,
-    deadlineSeconds: number,
-    whatIsBeingWaitedFor: string
-): Promise<void> {
-    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-    const deadlineRejection = new Promise<never>((_resolve, reject) => {
-        deadlineTimer = setTimeout(
-            () => reject(new Error(`timed out after ${deadlineSeconds}s waiting for ${whatIsBeingWaitedFor}`)),
-            deadlineSeconds * 1000
-        );
-    });
-
+async function describeFailureAs<Result>(failedStep: string, work: () => Promise<Result>): Promise<Result> {
     try {
-        await Promise.race([pendingWork, deadlineRejection]);
-    } finally {
-        clearTimeout(deadlineTimer);
-    }
-}
-
-async function describeFailureAs(failedStep: string, work: () => Promise<void>): Promise<void> {
-    try {
-        await work();
+        return await work();
     } catch (stepFailure) {
         const cause = stepFailure instanceof Error ? stepFailure.message : String(stepFailure);
         throw new Error(`${failedStep}: ${cause}`);
