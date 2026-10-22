@@ -1,4 +1,5 @@
 import type * as Y from "yjs";
+import type { PublishedTaskEntry } from "../delivery/taskDelivery.js";
 
 export type AgentRuntime = "node" | "python";
 
@@ -162,4 +163,5 @@ export interface DeployedFlowAgent {
 export interface FlowDeploymentResult {
     agents: DeployedFlowAgent[];
     createdDocumentIds: string[];
+    publishedEntries: PublishedTaskEntry[];
 }

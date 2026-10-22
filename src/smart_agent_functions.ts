@@ -27,7 +27,41 @@ export * from "./types/flow.types.js";
 export { FLOW_EXPORT_SCHEMAS_BY_VERSION } from "./flow/flowSchema.js";
 export { FlowValidationError, validateSemanticFlow } from "./flow/flowValidation.js";
 export { deploySemanticFlow, planSemanticFlowDeployment } from "./flow/flowDeployment.js";
-export { watchForTaskListEntry, type PublishedTaskAction } from "./flow/taskListEntryWatching.js";
+export { watchForTaskListEntry, type ObservedTaskListEntry, type PublishedTaskAction } from "./flow/taskListEntryWatching.js";
+export {
+    confirmTaskDelivery,
+    type DeliveryConnection,
+    type DeliveryMode,
+    type PublishedTaskEntry,
+    type TaskDeliveryEvent,
+    type TaskDeliveryOutcome,
+    type TaskDeliveryRequest,
+    type TaskDeliveryResult,
+    type TaskDeliveryState,
+    type TaskToConfirm
+} from "./delivery/taskDelivery.js";
+export {
+    CONTROL_PLANE_DOCUMENT_GUID,
+    LEDGER_KEY_PREFIX,
+    describeControlPlaneStatus,
+    readActiveVolt,
+    readAdvertisedClientUrls,
+    readControlPlaneStatus,
+    readLiveHostIds,
+    readTaskLedgerRecords,
+    type ActiveVolt,
+    type ControlPlaneStatus,
+    type StoredLedgerRecord
+} from "./delivery/controlPlaneGateway.js";
+export {
+    findConfigurationOfVolt,
+    readAdvertisedClientUrlsFromAnyVolt,
+    readVoltCandidate,
+    selectActiveVoltConfiguration,
+    type VoltCandidate
+} from "./delivery/activeVoltSelection.js";
+export { waitWithDeadline, type WaitReporter } from "./delivery/deadline.js";
+export { readTaskLedgerProgress, type TaskClaim, type TaskEndState, type TaskLedgerProgress } from "./delivery/taskLedgerProgress.js";
 export type { TrustGrantCredential, TrustGrantRequest } from "./types/shared.types.js";
 export { readPublicSigningIdentity, trustGrantKeyOf, type PublicSigningIdentity } from "./taskSigning.js";
 
@@ -72,12 +106,6 @@ const logger = winston.createLogger({
             maxFiles: 5,
             tailable: true
         })
-    ],
-    exceptionHandlers: [
-        new winston.transports.File({ filename: 'exceptions.log' })
-    ],
-    rejectionHandlers: [
-        new winston.transports.File({ filename: 'rejections.log' })
     ]
 });
 
@@ -802,6 +830,16 @@ export async function startTask( //TODO: add in translation schemas somehow
     }
 
     writeFieldToSynapseSubdoc(voltClient, v4(), { credential: taskVC2 }, tl.guid, mapname)
+}
+
+/**
+ * Writes a task list entry again under the key it was first written under, through the volt client of
+ * the latest getAndInitialiseVoltClient. A copy of the entry that comes back from another volt merges
+ * with it into one entry.
+ */
+export async function republishTaskListEntry(taskList: Y.Doc, entryKey: string, entry: object): Promise<void> {
+    const plainEntry = entry instanceof Y.AbstractType ? entry.toJSON() : entry;
+    await writeFieldToSynapseSubdoc(voltClient, entryKey, plainEntry, taskList.guid, mapname);
 }
 
 /**

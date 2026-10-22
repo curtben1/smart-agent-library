@@ -1,3 +1,3 @@
-import { installTask, startTask } from "../smart_agent_functions.js";
+import { installTask, republishTaskListEntry, startTask } from "../smart_agent_functions.js";
 
-export const taskCredentialPublishers = { installTask, startTask };
+export const taskCredentialPublishers = { installTask, startTask, republishTaskListEntry };
