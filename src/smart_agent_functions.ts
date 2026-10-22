@@ -106,12 +106,6 @@ const logger = winston.createLogger({
             maxFiles: 5,
             tailable: true
         })
-    ],
-    exceptionHandlers: [
-        new winston.transports.File({ filename: 'exceptions.log' })
-    ],
-    rejectionHandlers: [
-        new winston.transports.File({ filename: 'rejections.log' })
     ]
 });
 
