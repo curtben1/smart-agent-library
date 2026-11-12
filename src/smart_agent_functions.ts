@@ -14,11 +14,12 @@ import { TaskMetadata } from "./types/config.types";
 import { PublishWireRequest, PublishWireResponse, Resource, SaveResourceRequest, Status, SubscribeWireResponse } from "./types/volt.types";
 import { cli } from "winston/lib/winston/config";
 import { writeFieldToSynapseSubdoc } from "./agent_schemas.js";
+export { setTaskWriteSynapseId } from "./agent_schemas.js";
 import {
     EXTERNAL_PUMP_RESULT_ARRAY_SCHEMA,
     EXTERNAL_PUMP_RESULT_TEXT_SCHEMA,
     EXTERNAL_PUMP_TASK_SCHEMA,
-    SYNAPSE_ID
+    readTaskWriteSynapseId
 } from "./agent_schemas.js";
 // @ts-ignore
 import { YArray } from "yjs/dist/src/internals";
@@ -742,7 +743,7 @@ export async function installTask(
     writeFieldToSynapseSubdoc(voltClient, installArgs.taskID, { credential: taskVC }, installArgs.taskList.guid, mapname);
 }
 
-interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, output_pump_root?: string, synapse_write_path?: SynapseWriteObject, execute_after_timestamp_ms?: number, target_host?: string, validate_target_host?: boolean, rootDoc?: Y.Doc }
+interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, output_pump_root?: string, synapse_write_path?: SynapseWriteObject, execute_after_timestamp_ms?: number, target_host?: string, validate_target_host?: boolean, rootDoc?: Y.Doc, traceparent?: string }
 
 /**
  * @deprecated
@@ -777,6 +778,9 @@ export function startTask(taskID: string, taskList: Y.Doc, cli_args: string): Pr
  * collection under `path` instead of overwriting one key; readers of such a task have to watch
  * `$.<root>.*` rather than a single key, and the destination document's roots must already be
  * registered.
+ *
+ * `traceparent` is a W3C Trace Context `traceparent` that the run joins. Without it, the host takes
+ * the trace of the task's synapse input, or starts a new trace.
  * @param input_args - Object containing taskID, taskList, and optional std_in/cli_args/target host options.
  */
 export function startTask(input_args: StartTaskInputArgs): Promise<void>;
@@ -800,7 +804,7 @@ export async function startTask( //TODO: add in translation schemas somehow
     }
 
     // Handle new object signature
-    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, output_pump_root, synapse_write_path, execute_after_timestamp_ms } = taskIDOrArgs;
+    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, output_pump_root, synapse_write_path, execute_after_timestamp_ms, traceparent } = taskIDOrArgs;
     let taskVC2: SignedTaskCredential;
     if (outer_output_pump_location) {
         logger.warn("This form of custom location will be deprecated once the volt schema issues are resolved, synapse_write_path is preferred and will be the primary future method.")
@@ -816,6 +820,7 @@ export async function startTask( //TODO: add in translation schemas somehow
         ...(output_pump_root ? { output_pump_root } : {}),
         ...(synapse_write_path ? { synapse_write_path } : {}),
         ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {}),
+        ...(traceparent ? { traceparent } : {}),
         ...targetHostField
     };
 
@@ -1154,7 +1159,7 @@ interface SynapseDocumentRoot { name: string; type: "map" | "array" | "text"; js
 async function setSynapseDocumentRoots(documentId: string, roots: SynapseDocumentRoot[]) {
     try {
         const registration = await voltClient.SetSynapseDocumentMetadata({
-            database_id: SYNAPSE_ID,
+            database_id: readTaskWriteSynapseId(),
             document_id: documentId,
             metadata: roots.map((root) => ({ name: root.name, type: root.type, json_schema: root.jsonSchema })),
         });

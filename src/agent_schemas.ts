@@ -3,7 +3,16 @@ import { VoltClient } from "@tdxvolt/volt-client-grpc"
 import { add } from "winston";
 
 
-const SYNAPSE_ID = "@agent-synapse-1";
+let taskWriteSynapseId = "@agent-synapse-1";
+
+/** Names the synapse that task writes and root registrations go to. The default is @agent-synapse-1. */
+function setTaskWriteSynapseId(synapseId: string) {
+  taskWriteSynapseId = synapseId;
+}
+
+function readTaskWriteSynapseId(): string {
+  return taskWriteSynapseId;
+}
 
 // === SCHEMA DEFINITIONS ===
 
@@ -209,6 +218,12 @@ const TASK_LIST_SCHEMA = JSON.stringify({
                 description:
                   "host_id of the only host allowed to execute this task. Skips the ranked claim/election: the named host takes the task on sight and every other host ignores the entry. There is no fallback if that host is offline, unknown or lacks the runtime",
               },
+              traceparent: {
+                type: "string",
+                pattern: "^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+                description:
+                  "W3C Trace Context traceparent of the trace this run joins (for run-task). Without it the host takes the trace of the task's synapse input, or starts a new trace",
+              },
             },
             required: ["task-id", "action"],
             additionalProperties: true,
@@ -347,15 +362,15 @@ async function writeFieldToSynapseSubdoc(voltClient: VoltClient, field: string, 
 
   try {
     console.log("WriteSynapsePath args:", {
-      synapse_id: SYNAPSE_ID,
+      synapse_id: taskWriteSynapseId,
       document_id: documentId,
       path: jsonPath,
       json: JSON.stringify(value),
     });
 
     const resp = await voltClient.WriteSynapsePath({
-      synapse_id: SYNAPSE_ID,
-      database_id: SYNAPSE_ID,
+      synapse_id: taskWriteSynapseId,
+      database_id: taskWriteSynapseId,
       document_id: documentId,
       path: jsonPath,
       json: JSON.stringify(value),
@@ -385,6 +400,7 @@ export {
   TASK_LIST_SCHEMA,
   TASK_OUTPUT_TASK_SCHEMA,
   TASK_OUTPUTS_SCHEMA,
-  SYNAPSE_ID,
+  readTaskWriteSynapseId,
+  setTaskWriteSynapseId,
   writeFieldToSynapseSubdoc
 };

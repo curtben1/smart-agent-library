@@ -141,6 +141,18 @@ replica. A continuous task is unchanged: its records go to `resultArray`, watche
 `taskOutputs.<task-id>` streamed stdout is still the unnamed `Y.Text`, so it remains readable only
 through a CRDT replica and cannot be watched by path.
 
+### Joining a trace (`traceparent`)
+
+`startTask` accepts a W3C Trace Context `traceparent` and signs it into the run-task credential. The
+host then starts the task-run span in that trace, so the run and every output it causes join a trace
+that you started:
+
+```ts
+await startTask({ taskID, taskList: nodeTaskList, traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" });
+```
+
+Without it, the host takes the trace of the task's synapse input, or starts a new trace.
+
 ### Naming the root (`output_pump_root`)
 
 `output_pump_root` renames that text root. `startTask` and `install_and_launch` accept it and merge it
