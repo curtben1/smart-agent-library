@@ -59,6 +59,7 @@ export interface SignedTaskCredential extends VerifiableCredential {
         synapse_write_path?: SynapseWriteObject;
         execute_after_timestamp_ms?: number;
         target_host?: string;
+        traceparent?: string;
     };
 }
 
