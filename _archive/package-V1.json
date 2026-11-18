@@ -1,0 +1,38 @@
+{
+  "name": "@nqminds/smart-agent-functions",
+  "version": "1.17.1",
+  "main": "dist/smart_agent_functions.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "prepare": "npm run build"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "Smart agent utilities for Yjs task management with Volt",
+  "private": "true",
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.1",
+    "@tdxvolt/volt-client-grpc": "^0.20.8",
+    "ajv": "^8.20.0",
+    "uuid": "^9.0.1",
+    "verifiable-credential-toolkit": "^0.7.0",
+    "winston": "^3.18.3",
+    "yjs": "^13.6.27"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.9.3"
+  },
+  "types": "dist/smart_agent_functions.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ]
+}
