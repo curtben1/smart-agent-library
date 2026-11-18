@@ -60,6 +60,7 @@ export interface SignedTaskCredential extends VerifiableCredential {
         execute_after_timestamp_ms?: number;
         target_host?: string;
         traceparent?: string;
+        datapointTraces?: boolean;
     };
 }
 

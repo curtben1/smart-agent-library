@@ -77,6 +77,7 @@ export interface Agent {
     outputLocation: OutputLocation | null;
     inputTranslationSchema: TranslationSchema;
     outputTranslationSchema: TranslationSchema;
+    datapointTraces?: boolean;
 }
 
 export interface SemanticFlowExport {

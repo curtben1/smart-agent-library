@@ -167,6 +167,7 @@ async function startAgent(
                 ...optionalField("std_in", toStandardInput(agent.inputSource)),
                 ...optionalField("synapse_write_path", toSynapseWritePath(agent.outputLocation)),
                 ...optionalField("output_pump_root", agent.outputLocation?.outputPumpRoot),
+                ...(agent.datapointTraces ? { datapointTraces: true } : {}),
                 ...executeAfterField(options)
             }));
     });

@@ -101,6 +101,7 @@ const AGENT_SCHEMA = {
         name: { type: "string", minLength: 1 },
         runtime: { enum: ["node", "python"] },
         executionMode: { enum: ["continuous", "oneShot"] },
+        datapointTraces: { type: "boolean" },
         marketplaceLink: { type: "string", minLength: 1 },
         inputSource: {
             oneOf: [

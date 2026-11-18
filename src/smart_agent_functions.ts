@@ -743,7 +743,7 @@ export async function installTask(
     writeFieldToSynapseSubdoc(voltClient, installArgs.taskID, { credential: taskVC }, installArgs.taskList.guid, mapname);
 }
 
-interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, output_pump_root?: string, synapse_write_path?: SynapseWriteObject, execute_after_timestamp_ms?: number, target_host?: string, validate_target_host?: boolean, rootDoc?: Y.Doc, traceparent?: string }
+interface StartTaskInputArgs { taskID: string; taskList: Y.Doc; std_in?: object; cli_args?: string, continuous?: boolean, outer_output_pump_location?: string, output_pump_root?: string, synapse_write_path?: SynapseWriteObject, execute_after_timestamp_ms?: number, target_host?: string, validate_target_host?: boolean, rootDoc?: Y.Doc, traceparent?: string, datapointTraces?: boolean }
 
 /**
  * @deprecated
@@ -781,6 +781,9 @@ export function startTask(taskID: string, taskList: Y.Doc, cli_args: string): Pr
  *
  * `traceparent` is a W3C Trace Context `traceparent` that the run joins. Without it, the host takes
  * the trace of the task's synapse input, or starts a new trace.
+ *
+ * `datapointTraces` is experimental. With it, each output of a continuous task that names no cause
+ * starts its own trace, so a trace follows one value rather than one task run.
  * @param input_args - Object containing taskID, taskList, and optional std_in/cli_args/target host options.
  */
 export function startTask(input_args: StartTaskInputArgs): Promise<void>;
@@ -804,7 +807,7 @@ export async function startTask( //TODO: add in translation schemas somehow
     }
 
     // Handle new object signature
-    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, output_pump_root, synapse_write_path, execute_after_timestamp_ms, traceparent } = taskIDOrArgs;
+    const { taskID, taskList: tl, std_in, cli_args: ca, continuous, outer_output_pump_location, output_pump_root, synapse_write_path, execute_after_timestamp_ms, traceparent, datapointTraces } = taskIDOrArgs;
     let taskVC2: SignedTaskCredential;
     if (outer_output_pump_location) {
         logger.warn("This form of custom location will be deprecated once the volt schema issues are resolved, synapse_write_path is preferred and will be the primary future method.")
@@ -821,6 +824,7 @@ export async function startTask( //TODO: add in translation schemas somehow
         ...(synapse_write_path ? { synapse_write_path } : {}),
         ...(execute_after_timestamp_ms ? { execute_after_timestamp_ms: execute_after_timestamp_ms } : {}),
         ...(traceparent ? { traceparent } : {}),
+        ...(datapointTraces ? { datapointTraces: true } : {}),
         ...targetHostField
     };
 
