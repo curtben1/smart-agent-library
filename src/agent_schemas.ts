@@ -224,6 +224,11 @@ const TASK_LIST_SCHEMA = JSON.stringify({
                 description:
                   "W3C Trace Context traceparent of the trace this run joins (for run-task). Without it the host takes the trace of the task's synapse input, or starts a new trace",
               },
+              datapointTraces: {
+                type: "boolean",
+                description:
+                  "Experimental (for run-task). When true, each output of a continuous task that names no cause starts its own trace, linked to the task run",
+              },
             },
             required: ["task-id", "action"],
             additionalProperties: true,

@@ -153,6 +153,12 @@ await startTask({ taskID, taskList: nodeTaskList, traceparent: "00-4bf92f3577b34
 
 Without it, the host takes the trace of the task's synapse input, or starts a new trace.
 
+### One trace for each value (`datapointTraces`, experimental)
+
+`startTask({ ..., datapointTraces: true })` signs `datapointTraces: true` into the run-task
+credential. Each output of the continuous task that names no cause then starts its own trace, with a
+span link to the task-run span. A flow agent sets the same field as `"datapointTraces": true`.
+
 ### Naming the root (`output_pump_root`)
 
 `output_pump_root` renames that text root. `startTask` and `install_and_launch` accept it and merge it
